@@ -1,12 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
 import { config } from '../src/config.js';
 
 test('default and explicit configuration', () => {
   const defaults = config({});
   assert.equal(defaults.port, 8080);
   assert.equal(defaults.jwksURL, 'http://auth:8080/.well-known/jwks.json');
-  assert.match(defaults.dataDirectory, /\/banwords\/data\/$/);
+  assert.equal(isAbsolute(defaults.dataDirectory), true);
+  assert.equal(existsSync(join(defaults.dataDirectory, 'manifest.json')), true);
   assert.deepEqual(config({ PORT: '9876', BANWORDS_JWKS_URL: 'https://auth.test/keys', BANWORDS_DATA_DIR: '/data' }), {
     port: 9876, jwksURL: 'https://auth.test/keys', dataDirectory: '/data',
   });
