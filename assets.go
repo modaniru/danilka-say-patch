@@ -1,4 +1,4 @@
-// Package banwords bundles the immutable published dictionaries and API contract.
+// Package banwords bundles the Git-managed catalog and API contract.
 package banwords
 
 import (
@@ -6,7 +6,7 @@ import (
 	"io/fs"
 )
 
-//go:embed data/manifest.json data/versions/*.json
+//go:embed data/catalog.json
 var data embed.FS
 
 //go:embed openapi.json

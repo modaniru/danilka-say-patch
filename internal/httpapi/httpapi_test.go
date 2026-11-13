@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,7 +22,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"testing/fstest"
 	"time"
 
 	"github.com/modaniru/danilka-say-patch/internal/auth"
@@ -32,198 +33,184 @@ type verifierFunc func(context.Context, string) (auth.Claims, error)
 func (f verifierFunc) Verify(ctx context.Context, raw string) (auth.Claims, error) {
 	return f(ctx, raw)
 }
-
-type fakeCatalog struct {
-	dictionaries []catalog.Dictionary
-	fail         bool
-}
-
-func (c fakeCatalog) Lookup(id string) []catalog.Dictionary {
-	if c.fail {
-		panic("private catalog material")
-	}
-	if id == "0dMf" || id == "abcd" {
-		return c.dictionaries
-	}
-	return nil
-}
 func setup(t *testing.T) Options {
 	t.Helper()
 	loaded, err := catalog.Load(os.DirFS("../../data"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	current := loaded.Current
-	specification, err := os.ReadFile("../../openapi.json")
+	spec, err := os.ReadFile("../../openapi.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var seed struct {
-		Rules []struct {
-			Word string `json:"word"`
-		} `json:"rules"`
-	}
-	if err = json.Unmarshal(current, &seed); err != nil {
-		t.Fatal(err)
-	}
-	words := make([]string, len(seed.Rules))
-	for i, rule := range seed.Rules {
-		words[i] = rule.Word
-	}
-	dictionary, err := catalog.PrepareDictionary(words)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return Options{
-		Catalog: fakeCatalog{dictionaries: []catalog.Dictionary{dictionary}}, Current: current, OpenAPI: specification,
-		Verifier: verifierFunc(func(ctx context.Context, raw string) (auth.Claims, error) {
-			if raw != "valid" {
-				return auth.Claims{}, auth.ErrInvalidToken
-			}
-			return auth.Claims{Subject: "123"}, nil
-		}),
-	}
+	return Options{Catalog: loaded, OpenAPI: spec, Verifier: verifierFunc(func(_ context.Context, raw string) (auth.Claims, error) {
+		switch raw {
+		case "valid":
+			return auth.Claims{Subject: "123", Credential: "service-token", Permissions: []string{"banwords:dictionaries:read"}}, nil
+		case "session":
+			return auth.Claims{Subject: "123", Permissions: []string{"banwords:dictionaries:read"}}, nil
+		case "superadmin":
+			return auth.Claims{Subject: "123", Permissions: []string{"superadmin"}}, nil
+		default:
+			return auth.Claims{}, auth.ErrInvalidToken
+		}
+	})}
 }
 func request(h http.Handler, method, path string, headers ...string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(method, path, nil)
-	for _, value := range headers {
-		r.Header.Add("X-Auth-Token", value)
+	for _, v := range headers {
+		r.Header.Add("X-Auth-Token", v)
 	}
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	return w
 }
-func decode(t *testing.T, data []byte) any {
+func decode(t *testing.T, raw []byte) map[string]any {
 	t.Helper()
-	var v any
-	if err := json.Unmarshal(data, &v); err != nil {
+	var value map[string]any
+	if err := json.Unmarshal(raw, &value); err != nil {
 		t.Fatal(err)
 	}
-	return v
+	return value
 }
 
-func TestHTTPContractAndOpenAPI(t *testing.T) {
+func TestCatalogBodyHashETagAndOpenAPI(t *testing.T) {
 	opts := setup(t)
 	h := New(opts)
-	for _, path := range []string{CatalogPath, "/api/banwords/dictionaries/0dMf", OpenAPIPath, DocsPath} {
+	for _, path := range []string{CatalogPath, HashPath, OpenAPIPath} {
 		w := request(h, "GET", path, "valid")
-		if w.Code != 200 {
+		if w.Code != 200 || w.Header().Get("Content-Type") != "application/json; charset=utf-8" || w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("X-Content-Type-Options") != "nosniff" {
 			t.Fatalf("%s: %d %s", path, w.Code, w.Body)
 		}
-		if w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("X-Content-Type-Options") != "nosniff" {
-			t.Fatal("missing security headers")
+	}
+	body := request(h, "GET", CatalogPath, "valid")
+	if !bytes.Equal(body.Body.Bytes(), opts.Catalog.Body()) {
+		t.Fatal("catalog was encoded again")
+	}
+	sum := sha256.Sum256(body.Body.Bytes())
+	hash := hex.EncodeToString(sum[:])
+	if body.Header().Get("ETag") != `"`+hash+`"` {
+		t.Fatal("ETag must hash exact body bytes")
+	}
+	fresh := request(h, "GET", HashPath, "valid")
+	if !reflect.DeepEqual(decode(t, fresh.Body.Bytes()), map[string]any{"hash": hash}) || fresh.Header().Get("ETag") != "" {
+		t.Fatal("freshness does not refer to full catalog")
+	}
+	value := decode(t, body.Body.Bytes())
+	if len(value) != 4 || len(value["rules"].([]any)) != 22 {
+		t.Fatal("full functional source data lost")
+	}
+	for _, entry := range value["rules"].([]any) {
+		r := entry.(map[string]any)
+		if len(r) != 5 || r["matchMode"] == nil || r["replaceMode"] == nil {
+			t.Fatal("functional modes absent or client-only fields present")
 		}
-		if path == DocsPath {
-			if w.Header().Get("Content-Type") != "text/html; charset=utf-8" || !strings.Contains(w.Header().Get("Content-Security-Policy"), "default-src 'none'") {
-				t.Fatal("documentation headers")
-			}
-			if !strings.Contains(w.Body.String(), OpenAPIPath) || strings.Contains(w.Body.String(), "https://") || strings.Contains(w.Body.String(), "<script") {
-				t.Fatal("documentation must remain offline")
-			}
-		} else if w.Header().Get("Content-Type") != "application/json; charset=utf-8" {
-			t.Fatal("JSON content type")
+	}
+	spec := decode(t, request(h, "GET", OpenAPIPath, "session").Body.Bytes())
+	if !reflect.DeepEqual(spec, decode(t, opts.OpenAPI)) || spec["info"].(map[string]any)["version"] != "2.0.0" {
+		t.Fatal("OpenAPI mismatch")
+	}
+	paths := spec["paths"].(map[string]any)
+	got := []string{}
+	for path, entry := range paths {
+		got = append(got, path)
+		methods := entry.(map[string]any)
+		if len(methods) != 1 || methods["get"] == nil {
+			t.Fatal("GET-only specification")
 		}
-	}
-	if got := decode(t, request(h, "GET", CatalogPath, "valid").Body.Bytes()); !reflect.DeepEqual(got, decode(t, opts.Current)) {
-		t.Fatal("catalog changed")
-	}
-	if got := decode(t, request(h, "GET", OpenAPIPath, "valid").Body.Bytes()); !reflect.DeepEqual(got, decode(t, opts.OpenAPI)) {
-		t.Fatal("spec changed")
-	}
-	dictionary := request(h, "GET", "/api/banwords/dictionaries/0dMf?message=never-used", "valid")
-	var found struct {
-		Protocol     string               `json:"protocol"`
-		ID           string               `json:"id"`
-		Dictionaries []catalog.Dictionary `json:"dictionaries"`
-	}
-	if err := json.Unmarshal(dictionary.Body.Bytes(), &found); err != nil {
-		t.Fatal(err)
-	}
-	if found.Protocol != "sp/1" || found.ID != "0dMf" || len(found.Dictionaries) != 1 || len(found.Dictionaries[0].Words) != 22 {
-		t.Fatalf("lookup: %+v", found)
-	}
-	var spec struct {
-		Paths map[string]map[string]struct {
-			Responses map[string]json.RawMessage `json:"responses"`
-		} `json:"paths"`
-	}
-	if err := json.Unmarshal(opts.OpenAPI, &spec); err != nil {
-		t.Fatal(err)
-	}
-	paths := make([]string, 0, len(spec.Paths))
-	for path, methods := range spec.Paths {
-		paths = append(paths, path)
-		if len(methods) != 1 {
-			t.Fatal("only GET is documented")
-		}
-		operation, ok := methods["get"]
-		if !ok {
-			t.Fatal("missing GET")
-		}
-		required := []string{"405"}
+		operation := methods["get"].(map[string]any)
+		responses := operation["responses"].(map[string]any)
+		statuses := []string{"405"}
 		if path == HealthPath {
-			required = append(required, "204")
+			statuses = append(statuses, "204")
 		} else {
-			required = append(required, "200", "404", "429", "500", "503")
+			statuses = append(statuses, "200", "404", "429", "500", "503")
 		}
-		if path == DictionaryPath {
-			required = append(required, "400")
-		}
-		for _, status := range required {
-			if _, ok := operation.Responses[status]; !ok {
-				t.Fatalf("%s missing %s", path, status)
+		for _, status := range statuses {
+			if responses[status] == nil {
+				t.Fatalf("%s missing status %s", path, status)
 			}
 		}
 	}
-	expected := slices.Clone(Routes[:])
-	slices.Sort(paths)
-	slices.Sort(expected)
-	if !reflect.DeepEqual(paths, expected) {
-		t.Fatalf("OpenAPI routes %v != handlers %v", paths, expected)
+	slices.Sort(got)
+	want := slices.Clone(Routes[:])
+	slices.Sort(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("spec routes %v != handlers %v", got, want)
+	}
+	if len(spec["security"].([]any)) != 1 {
+		t.Fatal("data must permit only service bearer")
+	}
+	for _, path := range []string{CatalogPath, HashPath} {
+		if _, exists := paths[path].(map[string]any)["get"].(map[string]any)["security"]; exists {
+			t.Fatal("data must not allow cookie security")
+		}
+	}
+	if len(paths[OpenAPIPath].(map[string]any)["get"].(map[string]any)["security"].([]any)) != 2 {
+		t.Fatal("session must be able to obtain spec")
+	}
+	schemas := spec["components"].(map[string]any)["schemas"].(map[string]any)
+	if len(schemas) != 3 || schemas["Dictionary"] != nil {
+		t.Fatal("old dictionary schema retained")
+	}
+	props := schemas["Catalog"].(map[string]any)["properties"].(map[string]any)
+	rule := props["rules"].(map[string]any)["items"].(map[string]any)
+	if len(props) != 4 || len(rule["properties"].(map[string]any)) != 5 || len(rule["required"].([]any)) != 5 {
+		t.Fatal("functional schema changed")
 	}
 }
 
-func TestAuthenticationAndSenderHeaders(t *testing.T) {
-	opts := setup(t)
-	h := New(opts)
-	for _, path := range []string{CatalogPath, OpenAPIPath, DocsPath, "/api/banwords/dictionaries/0dMf"} {
+func TestServiceCredentialRequiredEvenForSuperadmin(t *testing.T) {
+	h := New(setup(t))
+	for _, token := range []string{"session", "superadmin"} {
+		for _, path := range []string{CatalogPath, HashPath} {
+			for _, method := range []string{"GET", "POST", "HEAD"} {
+				w := request(h, method, path, token)
+				if w.Code != 404 || w.Header().Get("ETag") != "" {
+					t.Fatalf("session revealed data %s %s: %d", method, path, w.Code)
+				}
+			}
+		}
+		if request(h, "GET", OpenAPIPath, token).Code != 200 {
+			t.Fatal("authenticated user cannot obtain OpenAPI")
+		}
+	}
+	for _, path := range []string{CatalogPath, HashPath, OpenAPIPath} {
 		for _, headers := range [][]string{nil, {""}, {"garbage"}, {"valid", "valid"}, {"valid", ""}} {
-			w := request(h, "GET", path, headers...)
-			if w.Code != 404 || w.Body.String() != `{"error":"не найдено"}` {
-				t.Fatalf("%s %q: %d %s", path, headers, w.Code, w.Body)
+			if w := request(h, "GET", path, headers...); w.Code != 404 {
+				t.Fatalf("untrusted header read %s: %d", path, w.Code)
 			}
 		}
 		r := httptest.NewRequest("GET", path, nil)
 		r.Header.Set("Authorization", "Bearer bw_private")
+		r.Header.Set("Cookie", "sid=superadmin")
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)
 		if w.Code != 404 {
-			t.Fatal("external bearer accepted")
+			t.Fatal("service accepted external cookie or bearer directly")
 		}
 	}
-	// Request cancellation/deadlines must reach the verifier unchanged.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
+	opts := setup(t)
 	opts.Verifier = verifierFunc(func(got context.Context, _ string) (auth.Claims, error) {
 		if got != ctx {
-			t.Fatal("context replaced")
+			t.Fatal("verifier context replaced")
 		}
 		return auth.Claims{}, auth.ErrInvalidToken
 	})
-	h = New(opts)
 	r := httptest.NewRequest("GET", CatalogPath, nil).WithContext(ctx)
 	r.Header.Set("X-Auth-Token", "valid")
-	h.ServeHTTP(httptest.NewRecorder(), r)
+	New(opts).ServeHTTP(httptest.NewRecorder(), r)
 }
 
-func TestMethodsHealthAndMalformedRoutes(t *testing.T) {
-	opts := setup(t)
-	h := New(opts)
+func TestMethodsHealthAndRemovedRoutes(t *testing.T) {
+	h := New(setup(t))
 	health := request(h, "GET", HealthPath)
 	if health.Code != 204 || health.Body.Len() != 0 {
-		t.Fatalf("health: %d %s", health.Code, health.Body)
+		t.Fatal("health")
 	}
-	for _, path := range []string{HealthPath, CatalogPath, OpenAPIPath, DocsPath, "/api/banwords/dictionaries/0dMf"} {
+	for _, path := range Routes {
 		for _, method := range []string{"POST", "PUT", "DELETE", "OPTIONS", "HEAD"} {
 			w := request(h, method, path, "valid")
 			if w.Code != 405 || w.Header().Get("Allow") != "GET" {
@@ -231,109 +218,71 @@ func TestMethodsHealthAndMalformedRoutes(t *testing.T) {
 			}
 		}
 	}
-	// Unsupported methods on closed routes must not reveal them before auth.
-	if got := request(h, "POST", CatalogPath).Code; got != 404 {
-		t.Fatalf("auth must precede 405, got %d", got)
-	}
-	for _, id := range []string{"abc", "abcde", "a%2Fb", "%0Aabc", "abcd=", "%30dMf", "%E2%82%AC"} {
-		w := request(h, "GET", "/api/banwords/dictionaries/"+id, "valid")
-		if w.Code != 400 {
-			t.Fatalf("id %s: %d", id, w.Code)
+	for _, path := range []string{"/missing", "/api/banwords/docs", "/api/banwords/dictionaries/0dMf", "/api/banwords/dictionaries/", "/api/banwords/dictionaries/abcd/extra", CatalogPath + "/", HashPath + "/", CatalogPath + "%2fhash"} {
+		for _, headers := range [][]string{nil, {"valid"}, {"session"}, {"superadmin"}} {
+			if got := request(h, "GET", path, headers...).Code; got != 404 {
+				t.Fatalf("removed or unknown %s: %d", path, got)
+			}
 		}
 	}
-	for _, path := range []string{"/missing", "/api/banwords/dictionaries/", "/api/banwords/dictionaries/0dMf/extra", CatalogPath + "/", CatalogPath + "%2F"} {
-		if got := request(h, "GET", path).Code; got != 404 {
-			t.Fatalf("path %s: %d", path, got)
-		}
-	}
-	if got := request(h, "GET", "/api/banwords/dictionaries/zzzz", "valid").Code; got != 404 {
-		t.Fatalf("unknown id: %d", got)
-	}
-}
-
-func TestLookupReturnsEveryCollision(t *testing.T) {
-	opts := setup(t)
-	opts.Catalog = fakeCatalog{dictionaries: []catalog.Dictionary{{ID: "abcd", Digest: "first", Words: []string{"a"}}, {ID: "abcd", Digest: "second", Words: []string{"b"}}}}
-	w := request(New(opts), "GET", "/api/banwords/dictionaries/abcd", "valid")
-	var found struct {
-		Dictionaries []catalog.Dictionary `json:"dictionaries"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &found); err != nil {
-		t.Fatal(err)
-	}
-	if w.Code != 200 || len(found.Dictionaries) != 2 || found.Dictionaries[0].Digest == found.Dictionaries[1].Digest {
-		t.Fatalf("collision response %d %+v", w.Code, found)
+	if request(h, "POST", CatalogPath).Code != 404 {
+		t.Fatal("method revealed unauthenticated data route")
 	}
 }
 
 func TestErrorsAndPanicsNeverExposeSecrets(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
 		err    error
 		status int
-	}{{"invalid", fmt.Errorf("private: %w", auth.ErrInvalidToken), 404}, {"keys", fmt.Errorf("private: %w", auth.ErrJWKSUnavailable), 503}, {"unknown", errors.New("private token value"), 500}} {
-		t.Run(tc.name, func(t *testing.T) {
-			opts := setup(t)
-			var logs bytes.Buffer
-			opts.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
-			opts.Verifier = verifierFunc(func(context.Context, string) (auth.Claims, error) { return auth.Claims{}, tc.err })
-			w := request(New(opts), "GET", CatalogPath, "valid")
-			if w.Code != tc.status {
-				t.Fatalf("got %d", w.Code)
-			}
-			if tc.status == 503 && w.Header().Get("Retry-After") != "5" {
-				t.Fatal("retry header")
-			}
-			if strings.Contains(w.Body.String(), "private") || strings.Contains(logs.String(), "private") {
-				t.Fatal("secret exposed")
-			}
-			if (logs.Len() > 0) != (tc.status == 500) {
-				t.Fatal("unexpected error logging")
-			}
-		})
+	}{{fmt.Errorf("private: %w", auth.ErrInvalidToken), 404}, {fmt.Errorf("private: %w", auth.ErrJWKSUnavailable), 503}, {errors.New("private material"), 500}} {
+		opts := setup(t)
+		var logs bytes.Buffer
+		opts.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
+		opts.Verifier = verifierFunc(func(context.Context, string) (auth.Claims, error) { return auth.Claims{}, tc.err })
+		w := request(New(opts), "GET", CatalogPath, "valid")
+		if w.Code != tc.status {
+			t.Fatalf("error status: %d", w.Code)
+		}
+		if tc.status == 503 && w.Header().Get("Retry-After") != "5" {
+			t.Fatal("retry header")
+		}
+		if strings.Contains(w.Body.String(), "private") || strings.Contains(logs.String(), "private") {
+			t.Fatal("secret leak")
+		}
+		if (logs.Len() > 0) != (tc.status == 500) {
+			t.Fatal("unexpected logging")
+		}
 	}
-	for _, kind := range []string{"verifier", "catalog", "bad current", "bad openapi"} {
-		t.Run(kind, func(t *testing.T) {
-			opts := setup(t)
-			var logs bytes.Buffer
-			opts.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
-			path := CatalogPath
-			switch kind {
-			case "verifier":
-				opts.Verifier = verifierFunc(func(context.Context, string) (auth.Claims, error) { panic("private bearer") })
-			case "catalog":
-				opts.Catalog = fakeCatalog{fail: true}
-				path = "/api/banwords/dictionaries/0dMf"
-			case "bad current":
-				opts.Current = json.RawMessage("private broken JSON")
-			case "bad openapi":
-				opts.OpenAPI = []byte("private broken JSON")
-				path = OpenAPIPath
-			}
-			w := request(New(opts), "GET", path, "valid")
-			if w.Code != 500 || w.Body.String() != `{"error":"внутренняя ошибка"}` {
-				t.Fatalf("%d %s", w.Code, w.Body)
-			}
-			if !strings.Contains(logs.String(), "request failed") || strings.Contains(logs.String(), "private") {
-				t.Fatal("unsafe logs")
-			}
-		})
+	for _, kind := range []string{"panic", "invalid-spec"} {
+		opts := setup(t)
+		var logs bytes.Buffer
+		opts.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
+		path := CatalogPath
+		if kind == "panic" {
+			opts.Verifier = verifierFunc(func(context.Context, string) (auth.Claims, error) { panic("private token") })
+		} else {
+			opts.OpenAPI = []byte("private broken JSON")
+			path = OpenAPIPath
+		}
+		w := request(New(opts), "GET", path, "valid")
+		if w.Code != 500 || w.Body.String() != `{"error":"внутренняя ошибка"}` || !strings.Contains(logs.String(), "request failed") || strings.Contains(logs.String(), "private") {
+			t.Fatal("unsafe internal failure")
+		}
 	}
 }
 
-func TestSnapshotInputsAndHTTPServer(t *testing.T) {
+func TestSnapshotAndRealWire(t *testing.T) {
 	opts := setup(t)
 	h := New(opts)
 	before := request(h, "GET", CatalogPath, "valid").Body.String()
 	spec := request(h, "GET", OpenAPIPath, "valid").Body.String()
-	for i := range opts.Current {
-		opts.Current[i] = 'x'
-	}
 	for i := range opts.OpenAPI {
 		opts.OpenAPI[i] = 'x'
 	}
+	body := opts.Catalog.Body()
+	body[0] = '!'
 	if request(h, "GET", CatalogPath, "valid").Body.String() != before || request(h, "GET", OpenAPIPath, "valid").Body.String() != spec {
-		t.Fatal("caller mutated snapshot")
+		t.Fatal("caller changed HTTP snapshot")
 	}
 	server := httptest.NewServer(h)
 	defer server.Close()
@@ -351,8 +300,12 @@ func TestSnapshotInputsAndHTTPServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.StatusCode != 200 || !reflect.DeepEqual(decode(t, data), decode(t, []byte(before))) {
-		t.Fatal("wire response")
+	if response.StatusCode != 200 || string(data) != before {
+		t.Fatal("wire bytes changed")
+	}
+	sum := sha256.Sum256(data)
+	if response.Header.Get("ETag") != `"`+hex.EncodeToString(sum[:])+`"` {
+		t.Fatal("wire ETag mismatch")
 	}
 }
 
@@ -360,16 +313,18 @@ func TestHTTPRateLimit(t *testing.T) {
 	opts := setup(t)
 	now := time.Unix(1000, 0)
 	opts.Limiter = NewRateLimiter(LimiterOptions{Limit: 1, MaxUsers: 2, Now: func() time.Time { return now }})
-	opts.Verifier = verifierFunc(func(_ context.Context, raw string) (auth.Claims, error) { return auth.Claims{Subject: raw}, nil })
+	opts.Verifier = verifierFunc(func(_ context.Context, raw string) (auth.Claims, error) {
+		return auth.Claims{Subject: raw, Credential: "service-token"}, nil
+	})
 	h := New(opts)
 	if request(h, "GET", CatalogPath, "alice").Code != 200 {
-		t.Fatal("first request blocked")
+		t.Fatal("first request")
 	}
-	w := request(h, "GET", DocsPath, "alice")
+	w := request(h, "GET", HashPath, "alice")
 	if w.Code != 429 || w.Header().Get("Retry-After") != "60" {
-		t.Fatalf("%d %+v", w.Code, w.Header())
+		t.Fatal("rate header")
 	}
-	if request(h, "GET", CatalogPath, "bob").Code != 200 || request(h, "GET", CatalogPath, "carol").Code != 429 {
+	if request(h, "GET", OpenAPIPath, "bob").Code != 200 || request(h, "GET", CatalogPath, "carol").Code != 429 {
 		t.Fatal("subject/memory bounds")
 	}
 	now = now.Add(time.Minute)
@@ -377,7 +332,6 @@ func TestHTTPRateLimit(t *testing.T) {
 		t.Fatal("window did not expire")
 	}
 }
-
 func TestLimiterWindowBoundsAndDefaults(t *testing.T) {
 	now := time.Unix(1, 0)
 	l := NewRateLimiter(LimiterOptions{Limit: 1, Period: 1500 * time.Millisecond, MaxUsers: 1, Now: func() time.Time { return now }})
@@ -427,8 +381,6 @@ func TestLimiterConcurrentRequests(t *testing.T) {
 	}
 }
 
-// Exercise the complete service-side path with a real Ed25519 JWT and a local
-// JWKS transport; no OAuth or production endpoints are contacted.
 func TestSignedJWTThroughHTTPAndJWKS(t *testing.T) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -448,17 +400,21 @@ func TestSignedJWTThroughHTTPAndJWKS(t *testing.T) {
 	opts := setup(t)
 	opts.Verifier = auth.New(auth.Options{URL: keys.URL + "/keys", Now: func() time.Time { return now }, CacheTTL: time.Minute})
 	h := New(opts)
-	issue := func(audience string, perms []string, expires int64) string {
+	issue := func(audience string, perms []string, expires int64, credential ...any) string {
 		header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"EdDSA","typ":"JWT","kid":"first"}`))
-		payload, err := json.Marshal(map[string]any{"iss": "danysik-auth", "sub": "123", "aud": audience, "perms": perms, "iat": 1000, "exp": expires})
+		claims := map[string]any{"iss": "danysik-auth", "sub": "123", "aud": audience, "perms": perms, "iat": 1000, "exp": expires}
+		if len(credential) > 0 {
+			claims["credential"] = credential[0]
+		}
+		payload, err := json.Marshal(claims)
 		if err != nil {
 			t.Fatal(err)
 		}
 		signing := header + "." + base64.RawURLEncoding.EncodeToString(payload)
 		return signing + "." + base64.RawURLEncoding.EncodeToString(ed25519.Sign(private, []byte(signing)))
 	}
-	token := issue("banwords", []string{"banwords:dictionaries:read"}, 1120)
-	if got := request(h, "GET", "/api/banwords/dictionaries/0dMf", token).Code; got != 200 {
+	token := issue("banwords", []string{"banwords:dictionaries:read"}, 1120, "service-token")
+	if got := request(h, "GET", CatalogPath, token).Code; got != 200 {
 		t.Fatalf("valid JWT got %d", got)
 	}
 	for _, bad := range []string{issue("tts", []string{"banwords:dictionaries:read"}, 1120), issue("banwords", []string{"banwords"}, 1120), issue("banwords", []string{"banwords:dictionaries:read"}, 999)} {
@@ -469,6 +425,23 @@ func TestSignedJWTThroughHTTPAndJWKS(t *testing.T) {
 	if fetches.Load() != 1 {
 		t.Fatalf("JWKS cache: fetched %d times", fetches.Load())
 	}
+	for _, perms := range [][]string{{"banwords:dictionaries:read"}, {"superadmin"}} {
+		session := issue("banwords", perms, 1120)
+		for _, path := range []string{CatalogPath, HashPath} {
+			if got := request(h, "GET", path, session).Code; got != 404 {
+				t.Fatalf("session read data: %d", got)
+			}
+		}
+		if got := request(h, "GET", OpenAPIPath, session).Code; got != 200 {
+			t.Fatal("session cannot obtain OpenAPI")
+		}
+	}
+	for _, credential := range []any{nil, "", false, "session", "Service-Token"} {
+		bad := issue("banwords", []string{"superadmin"}, 1120, credential)
+		if got := request(h, "GET", CatalogPath, bad).Code; got != 404 {
+			t.Fatal("malformed credential accepted")
+		}
+	}
 	keys.Close()
 	if got := request(h, "GET", CatalogPath, token).Code; got != 200 {
 		t.Fatalf("fresh cached keys got %d", got)
@@ -477,98 +450,5 @@ func TestSignedJWTThroughHTTPAndJWKS(t *testing.T) {
 	unavailable := request(h, "GET", CatalogPath, token)
 	if unavailable.Code != 503 || unavailable.Header().Get("Retry-After") != "5" {
 		t.Fatalf("expired JWKS cache got %d", unavailable.Code)
-	}
-}
-
-func TestFullFunctionalCatalogResponseAndSchema(t *testing.T) {
-	opts := setup(t)
-	h := New(opts)
-	response := request(h, "GET", CatalogPath, "valid")
-	value := decode(t, response.Body.Bytes()).(map[string]any)
-	if response.Code != 200 || len(value) != 4 {
-		t.Fatalf("full catalog response: %d %s", response.Code, response.Body)
-	}
-	rules := value["rules"].([]any)
-	variants := value["variants"].([]any)
-	if len(rules) != 22 || len(variants) != 22 {
-		t.Fatal("incomplete server catalog")
-	}
-	fields := []string{"category", "matchMode", "replaceMode", "variantIds", "word"}
-	for _, entry := range rules {
-		rule := entry.(map[string]any)
-		keys := make([]string, 0, len(rule))
-		for key := range rule {
-			keys = append(keys, key)
-		}
-		slices.Sort(keys)
-		if !reflect.DeepEqual(keys, fields) {
-			t.Fatalf("catalog rule includes missing or client-only fields: %#v", rule)
-		}
-		if rule["replaceMode"] != "word" {
-			t.Fatal("published replacement mode changed")
-		}
-		want := "substring"
-		if rule["word"] == "Денчик" || rule["word"] == "жид" {
-			want = "word"
-		}
-		if rule["matchMode"] != want {
-			t.Fatal("published matching policy changed")
-		}
-	}
-	spec := decode(t, opts.OpenAPI).(map[string]any)
-	if spec["info"].(map[string]any)["version"] != "1.2.0" {
-		t.Fatal("contract version not updated")
-	}
-	schemas := spec["components"].(map[string]any)["schemas"].(map[string]any)
-	catalogSchema := schemas["Catalog"].(map[string]any)
-	if catalogSchema["additionalProperties"] != false {
-		t.Fatal("catalog schema must be closed")
-	}
-	properties := catalogSchema["properties"].(map[string]any)
-	if len(properties) != 4 {
-		t.Fatal("server catalog schema includes client settings")
-	}
-	ruleSchema := properties["rules"].(map[string]any)["items"].(map[string]any)
-	if ruleSchema["additionalProperties"] != false {
-		t.Fatal("rule schema must be closed")
-	}
-	required := []string{}
-	for _, field := range ruleSchema["required"].([]any) {
-		required = append(required, field.(string))
-	}
-	slices.Sort(required)
-	if !reflect.DeepEqual(required, fields) {
-		t.Fatal("functional modes must be required in Swagger")
-	}
-	ruleProperties := ruleSchema["properties"].(map[string]any)
-	propertyNames := []string{}
-	for name := range ruleProperties {
-		propertyNames = append(propertyNames, name)
-	}
-	slices.Sort(propertyNames)
-	if !reflect.DeepEqual(propertyNames, fields) {
-		t.Fatal("rule schema includes client-only fields")
-	}
-	if !reflect.DeepEqual(ruleProperties["matchMode"].(map[string]any)["enum"], []any{"word", "substring"}) ||
-		!reflect.DeepEqual(ruleProperties["replaceMode"].(map[string]any)["enum"], []any{"word", "match"}) {
-		t.Fatal("functional mode enums changed")
-	}
-}
-
-func TestMatchedFragmentAndSubstringModesPassThroughAPI(t *testing.T) {
-	current := []byte(`{"format":"saypatch-rules","version":1,"variants":["replacement"],"rules":[{"word":"part","category":"safe","variantIds":[0],"matchMode":"substring","replaceMode":"match"}]}`)
-	files := fstest.MapFS{
-		"manifest.json":    {Data: []byte(`{"current":"v1","versions":["v1"]}`)},
-		"versions/v1.json": {Data: current},
-	}
-	loaded, err := catalog.Load(files)
-	if err != nil {
-		t.Fatal(err)
-	}
-	opts := setup(t)
-	opts.Catalog, opts.Current = loaded, loaded.Current
-	response := request(New(opts), "GET", CatalogPath, "valid")
-	if response.Code != 200 || !reflect.DeepEqual(decode(t, response.Body.Bytes()), decode(t, current)) {
-		t.Fatal("matched-fragment replacement and substring matching must remain backend-owned functional data")
 	}
 }

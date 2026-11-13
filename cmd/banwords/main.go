@@ -54,7 +54,7 @@ func run(ctx context.Context, args []string, lookup func(string) (string, bool),
 		return err
 	}
 	logger := slog.New(slog.NewJSONHandler(output, nil))
-	handler := httpapi.New(httpapi.Options{Catalog: loaded, Current: loaded.Current,
+	handler := httpapi.New(httpapi.Options{Catalog: loaded,
 		Verifier: auth.New(auth.Options{URL: cfg.JWKSURL}), OpenAPI: assets.OpenAPI, Logger: logger})
 	listener, err := net.Listen("tcp", ":"+strconv.Itoa(cfg.Port))
 	if err != nil {

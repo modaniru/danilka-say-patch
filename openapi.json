@@ -1,123 +1,354 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "Banwords dictionaries API",
-    "version": "1.2.0",
-    "description": "Закрытый сервис словарей протокола sp/1 на Go (net/http); совместим с прежним JSON API. Внешний клиент передаёт Authorization: Bearer bw_… в Caddy. Auth проверяет opaque service-токен, его service scope и текущие права владельца, затем Caddy передаёт внутренний Ed25519 JWT в X-Auth-Token. Сервис принимает единственный заголовок X-Auth-Token и проверяет iss=danysik-auth, aud=banwords, exp и banwords:dictionaries:read (либо superadmin). Без доступа — 404. Текст сообщений не отправляется и не логируется. Изменение хендлеров требует обновления этой спецификации."
+    "title": "Banwords catalog API",
+    "version": "2.0.0",
+    "description": "Один функциональный каталог из Git-файла data/catalog.json. Данные /catalog и /catalog/hash доступны только через внешний service-токен Authorization: Bearer bw_…. Caddy/auth проверяет токен и актуальные права, затем выдаёт Ed25519 JWT с credential=service-token, iss=danysik-auth, aud=banwords и banwords:dictionaries:read. Cookie-сессия, включая superadmin, не открывает данные. OpenAPI JSON допускает также сессию с правом чтения. Текст сообщений не передаётся. История изменений хранится в Git; lookup словарей и runtime-архив отсутствуют."
   },
-  "servers": [{ "url": "https://danysik.ru" }],
-  "security": [{ "serviceToken": [] }],
+  "servers": [
+    {
+      "url": "https://danysik.ru"
+    }
+  ],
+  "security": [
+    {
+      "serviceToken": []
+    }
+  ],
   "paths": {
     "/api/banwords/catalog": {
       "get": {
         "operationId": "getCatalog",
-        "summary": "Полный опубликованный каталог функциональных правил",
-        "description": "Полный функциональный каталог saypatch-rules (wire version=1), публикация v2. Каждое правило содержит исходное слово, категорию, variantIds и явные matchMode/replaceMode; клиенту не требуется выводить режимы из категории. matchMode=substring ищет внутри слова, word — целое слово. replaceMode=match заменяет совпавший фрагмент, word — всё содержащее его слово. Каталог содержит все 22 исходных правила и прежние замены, включая safe-правило Денчик; hash1=0dMf не изменён. Исторический v1 сохранён для lookup. Схема закрытая: неизвестные поля отклоняются при публикации. Запрос не публикует пользовательские слова.",
+        "summary": "Полный функциональный каталог",
+        "description": "Слова, варианты, категории и явные matchMode/replaceMode берутся из одного data/catalog.json. JSON приводится json.Marshal к стабильному порядку ключей; отступы и порядок ключей исходного файла не влияют на hash. ETag — SHA-256 тех же байтов, которые возвращаются в теле. Любое поле, порядок правил и вариантов входят в hash. Формат saypatch-rules/version=1 сохранён. Ответ всегда GET 200, условный GET/304 не используется.",
         "responses": {
-          "200": { "description": "Текущий каталог", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Catalog" } } } },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
-          "429": { "$ref": "#/components/responses/RateLimited" },
-          "500": { "$ref": "#/components/responses/InternalError" },
-          "503": { "$ref": "#/components/responses/Unavailable" }
+          "200": {
+            "description": "Каталог и strong ETag полного тела ответа.",
+            "headers": {
+              "ETag": {
+                "description": "SHA-256 точных байтов тела, 64 lowercase hex в двойных кавычках.",
+                "schema": {
+                  "type": "string",
+                  "pattern": "^\"[0-9a-f]{64}\"$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Catalog"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
         }
       }
     },
-    "/api/banwords/dictionaries/{id}": {
+    "/api/banwords/catalog/hash": {
       "get": {
-        "operationId": "getDictionaries",
-        "summary": "Все версии словарей с указанным hash1",
-        "description": "hash1 — первые 24 бита SHA256 UTF-8 JSON.stringify(['sp',1,'dictionary',words]), Base64url без padding. words = unique(NFC(lower(NFC(word)))), сортировка JavaScript UTF-16 Array.sort(). При коллизии возвращаются ВСЕ различные словари с HTTP 200, максимум 8; публикация девятого словаря с тем же id отклоняется при старте. Клиент проверяет формат, канонизацию и id и сохраняет все кандидаты; при нескольких кандидатах нельзя произвольно расшифровывать код. Полный digest публикуется как дополнительный идентификатор состава для диагностики. Исторические версии доступны, даже когда текущий каталог обновился.",
-        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^[A-Za-z0-9_-]{4}$", "minLength": 4, "maxLength": 4 }, "example": "0dMf" }],
+        "operationId": "getCatalogHash",
+        "summary": "Актуальный SHA-256 всего каталога",
+        "description": "Возвращает {hash}. Хэш совпадает с SHA-256 тела GET /catalog и значением его ETag без кавычек. Учитываются все поля каталога, включая режимы и варианты замен. Для данных обязателен service-токен; cookie-сессия не подходит.",
         "responses": {
           "200": {
-            "description": "Полный набор совпадений, в том числе коллизии",
-            "content": { "application/json": { "schema": {
-              "type": "object", "required": ["protocol", "id", "dictionaries"], "additionalProperties": false,
-              "properties": {
-                "protocol": { "const": "sp/1" },
-                "id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{4}$" },
-                "dictionaries": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "$ref": "#/components/schemas/Dictionary" } }
+            "description": "Свежесть полного функционального каталога.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogHash"
+                }
               }
-            } } }
+            }
           },
-          "400": { "description": "hash1 имеет неправильный формат", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
-          "429": { "$ref": "#/components/responses/RateLimited" },
-          "500": { "$ref": "#/components/responses/InternalError" },
-          "503": { "$ref": "#/components/responses/Unavailable" }
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
         }
       }
     },
     "/api/banwords/openapi.json": {
       "get": {
-        "operationId": "getOpenAPI", "summary": "Эта спецификация OpenAPI 3.1",
+        "operationId": "getOpenAPI",
+        "summary": "Спецификация OpenAPI 3.1",
+        "description": "Метаданные доступны по service-токену или cookie-сессии с правом чтения.",
         "responses": {
-          "200": { "description": "OpenAPI document", "content": { "application/json": { "schema": { "type": "object" } } } },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
-          "429": { "$ref": "#/components/responses/RateLimited" },
-          "500": { "$ref": "#/components/responses/InternalError" },
-          "503": { "$ref": "#/components/responses/Unavailable" }
-        }
-      }
-    },
-    "/api/banwords/docs": {
-      "get": {
-        "operationId": "getDocs", "summary": "Локальная справка и ссылка на Swagger/OpenAPI без CDN",
-        "responses": {
-          "200": { "description": "HTML-справка", "content": { "text/html": { "schema": { "type": "string" } } } },
-          "404": { "$ref": "#/components/responses/NotFound" },
-          "405": { "$ref": "#/components/responses/MethodNotAllowed" },
-          "429": { "$ref": "#/components/responses/RateLimited" },
-          "500": { "$ref": "#/components/responses/InternalError" },
-          "503": { "$ref": "#/components/responses/Unavailable" }
-        }
+          "200": {
+            "description": "OpenAPI document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "security": [
+          {
+            "serviceToken": []
+          },
+          {
+            "cookieSession": []
+          }
+        ]
       }
     },
     "/healthz": {
       "get": {
-        "operationId": "healthcheck", "summary": "Внутренняя проверка готовности, наружу не проксируется", "security": [],
-        "responses": { "204": { "description": "Сервис запущен, все seed-версии валидированы при старте" }, "405": { "$ref": "#/components/responses/MethodNotAllowed" } }
+        "operationId": "healthcheck",
+        "summary": "Внутренняя готовность, наружу не проксируется",
+        "security": [],
+        "responses": {
+          "204": {
+            "description": "Единственный каталог валидирован при старте."
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          }
+        }
       }
     }
   },
   "components": {
-    "securitySchemes": { "serviceToken": { "type": "http", "scheme": "bearer", "bearerFormat": "bw_<opaque random secret>", "description": "Выдаётся auth на сайте, проверяется только gateway/auth. Не является внутренним JWT." } },
+    "securitySchemes": {
+      "serviceToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "bw_<opaque random secret>",
+        "description": "Внешний service-токен auth. Проверяется Caddy/auth; backend принимает только подписанный внутренний JWT с credential=service-token. Единственный способ чтения каталога и hash."
+      },
+      "cookieSession": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "sid",
+        "description": "Вход через Twitch; разрешён только для OpenAPI JSON /openapi.json. Не открывает каталог или hash даже суперадминистратору."
+      }
+    },
     "schemas": {
-      "Error": { "type": "object", "required": ["error"], "additionalProperties": false, "properties": { "error": { "type": "string" } } },
-      "Dictionary": {
-        "type": "object", "required": ["id", "digest", "words"], "additionalProperties": false,
+      "Error": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "additionalProperties": false,
         "properties": {
-          "id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{4}$" },
-          "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Полный SHA256 canonical JSON, hex" },
-          "words": { "type": "array", "minItems": 1, "maxItems": 50, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 100 } }
+          "error": {
+            "type": "string"
+          }
+        }
+      },
+      "CatalogHash": {
+        "type": "object",
+        "required": [
+          "hash"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "SHA-256 полного тела GET /catalog без кавычек ETag."
+          }
         }
       },
       "Catalog": {
-        "type": "object", "required": ["format", "version", "variants", "rules"], "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "format",
+          "version",
+          "variants",
+          "rules"
+        ],
+        "additionalProperties": false,
         "properties": {
-          "format": { "const": "saypatch-rules" }, "version": { "const": 1 },
-          "variants": { "type": "array", "minItems": 1, "maxItems": 2500, "items": { "type": "string", "minLength": 1, "maxLength": 100 } },
-          "rules": { "type": "array", "minItems": 1, "maxItems": 50, "items": {
-            "type": "object", "required": ["word", "category", "variantIds", "matchMode", "replaceMode"], "additionalProperties": false,
-            "properties": {
-              "word": { "type": "string", "minLength": 1, "maxLength": 50 },
-              "category": { "enum": ["safe", "banword"] },
-              "variantIds": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "type": "integer", "minimum": 0, "maximum": 2499 } },
-              "matchMode": { "enum": ["word", "substring"], "description": "word — целое слово; substring — поиск внутри слова" }, "replaceMode": { "enum": ["word", "match"], "description": "word — заменить содержащее слово целиком; match — заменить только совпавший фрагмент" }
+          "format": {
+            "const": "saypatch-rules"
+          },
+          "version": {
+            "const": 1
+          },
+          "variants": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 2500,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
             }
-          } }
+          },
+          "rules": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "items": {
+              "type": "object",
+              "required": [
+                "word",
+                "category",
+                "variantIds",
+                "matchMode",
+                "replaceMode"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "word": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 50
+                },
+                "category": {
+                  "enum": [
+                    "safe",
+                    "banword"
+                  ]
+                },
+                "variantIds": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 50,
+                  "items": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2499
+                  }
+                },
+                "matchMode": {
+                  "enum": [
+                    "word",
+                    "substring"
+                  ],
+                  "description": "word — целое слово; substring — поиск внутри слова"
+                },
+                "replaceMode": {
+                  "enum": [
+                    "word",
+                    "match"
+                  ],
+                  "description": "word — заменить содержащее слово целиком; match — заменить только совпавший фрагмент"
+                }
+              }
+            }
+          }
         }
       }
     },
     "responses": {
-      "NotFound": { "description": "Неизвестный словарь/путь либо отсутствующий, неверный или недостаточный доступ", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
-      "MethodNotAllowed": { "description": "Разрешён только GET (Allow: GET)", "headers": { "Allow": { "schema": { "const": "GET" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
-      "RateLimited": { "description": "Лимит 60 запросов/мин на владельца токена, включая документацию; максимум 10000 активных владельцев", "headers": { "Retry-After": { "schema": { "type": "integer", "minimum": 1, "maximum": 60 } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
-      "InternalError": { "description": "Внутренняя ошибка без секретов и подробностей", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
-      "Unavailable": { "description": "Временная недоступность JWKS auth. Истёкшие ключи из кеша не используются", "headers": { "Retry-After": { "schema": { "const": "5" } } }, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+      "NotFound": {
+        "description": "Неизвестный путь, неверный JWT, недостаточные права либо попытка чтения данных через cookie-сессию (включая superadmin).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "MethodNotAllowed": {
+        "description": "Разрешён только GET (Allow: GET)",
+        "headers": {
+          "Allow": {
+            "schema": {
+              "const": "GET"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "RateLimited": {
+        "description": "Лимит 60 запросов/мин на владельца токена, включая документацию; максимум 10000 активных владельцев",
+        "headers": {
+          "Retry-After": {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 60
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "InternalError": {
+        "description": "Внутренняя ошибка без секретов и подробностей",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Unavailable": {
+        "description": "Временная недоступность JWKS auth. Истёкшие ключи из кеша не используются",
+        "headers": {
+          "Retry-After": {
+            "schema": {
+              "const": "5"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
     }
   }
 }

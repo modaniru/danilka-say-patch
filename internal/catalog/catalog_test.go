@@ -8,13 +8,10 @@ import (
 	"io/fs"
 	"os"
 	"reflect"
-	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"testing/fstest"
-	"unicode/utf8"
 )
 
 func encoded(t *testing.T, value any) []byte {
@@ -25,344 +22,233 @@ func encoded(t *testing.T, value any) []byte {
 	}
 	return raw
 }
-
-func ruleCatalog(word string) map[string]any {
+func ruleCatalog() map[string]any {
 	return map[string]any{
-		"format": "saypatch-rules", "version": 1,
-		"variants": []any{"replacement"},
-		"rules":    []any{map[string]any{"word": word, "category": "banword", "variantIds": []any{0}, "matchMode": "substring", "replaceMode": "word"}},
+		"format": "saypatch-rules", "version": 1, "variants": []any{"first", "second"},
+		"rules": []any{
+			map[string]any{"word": "Part", "category": "safe", "variantIds": []any{0}, "matchMode": "word", "replaceMode": "word"},
+			map[string]any{"word": "Other", "category": "banword", "variantIds": []any{1}, "matchMode": "substring", "replaceMode": "match"},
+		},
 	}
 }
-
-func catalogFS(t *testing.T, words []string, current string) fstest.MapFS {
+func loadBytes(raw []byte) (*Catalog, error) { return Load(fstest.MapFS{"catalog.json": {Data: raw}}) }
+func loaded(t *testing.T, value any) *Catalog {
 	t.Helper()
-	files := fstest.MapFS{}
-	versions := []string{}
-	for i, word := range words {
-		version := "v" + strconv.Itoa(i+1)
-		versions = append(versions, version)
-		files["versions/"+version+".json"] = &fstest.MapFile{Data: encoded(t, ruleCatalog(word))}
-	}
-	files["manifest.json"] = &fstest.MapFile{Data: encoded(t, map[string]any{"current": current, "versions": versions})}
-	return files
-}
-
-func prepared(t *testing.T, words ...string) Dictionary {
-	t.Helper()
-	result, err := PrepareDictionary(words)
+	c, err := loadBytes(encoded(t, value))
 	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+func clone(t *testing.T, value any) map[string]any {
+	t.Helper()
+	var result map[string]any
+	if err := json.Unmarshal(encoded(t, value), &result); err != nil {
 		t.Fatal(err)
 	}
 	return result
 }
 
-func TestJavaScriptUnicode16Parity(t *testing.T) {
-	// Checked-in reference data comes from Node.js 22.18, not from Go's
-	// Unicode tables. The generator is test-only; Go CI does not need Node.
-	raw, err := os.ReadFile("testdata/js-unicode16.json")
+func TestSinglePublishedCatalog(t *testing.T) {
+	c, err := Load(os.DirFS("../../data"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var reference struct {
-		Unicode       string
-		ContextDigest string
-		Changes       [][2]string
-		Ranges        [][2]rune
-		Dictionaries  []struct {
-			Input  []string
-			Words  []string
-			ID     string
-			Digest string
-		}
-	}
-	if err := json.Unmarshal(raw, &reference); err != nil {
-		t.Fatal(err)
-	}
-	if reference.Unicode != "16.0" || len(reference.Changes) != 2521 || len(reference.Ranges) != 820 {
-		t.Fatal("reference fixture unexpectedly changed")
-	}
-	changes := make(map[string]string, len(reference.Changes))
-	for _, change := range reference.Changes {
-		changes[change[0]] = change[1]
-	}
-	contexts := sha256.New()
-	index := 0
-	for cp := rune(0); cp <= utf8.MaxRune; cp++ {
-		for index < len(reference.Ranges) && reference.Ranges[index][1] < cp {
-			index++
-		}
-		allowed := index < len(reference.Ranges) && reference.Ranges[index][0] <= cp
-		word := string(cp)
-		if validWord(word) != allowed {
-			t.Fatalf("JavaScript word validation differs at U+%04X", cp)
-		}
-		if !allowed {
-			continue
-		}
-		expected, changed := changes[word]
-		if !changed {
-			expected = word
-		}
-		if got := canonicalWord(word); got != expected {
-			t.Fatalf("JavaScript lowercase/NFC differs at U+%04X: got %q, want %q", cp, got, expected)
-		}
-		for _, context := range []string{"AΣ" + word, word + "Σ", "AΣ" + word + "A", "A" + word + "Σ"} {
-			contexts.Write([]byte(canonicalWord(context)))
-			contexts.Write([]byte{0})
-		}
-	}
-	if got := hex.EncodeToString(contexts.Sum(nil)); got != reference.ContextDigest {
-		t.Fatalf("JavaScript Final_Sigma context differs: got %s, want %s", got, reference.ContextDigest)
-	}
-	for i, fixture := range reference.Dictionaries {
-		got := prepared(t, fixture.Input...)
-		expected := Dictionary{ID: fixture.ID, Digest: fixture.Digest, Words: fixture.Words}
-		if !reflect.DeepEqual(got, expected) {
-			t.Fatalf("JavaScript dictionary fixture %d differs: got %#v, want %#v", i, got, expected)
-		}
-	}
-}
-
-func TestPrepareDictionaryValidationAndCopy(t *testing.T) {
-	for _, input := range [][]string{
-		nil, {}, make([]string, 51), {""}, {"a b"}, {"[x]"}, {"a\n"}, {"<script>"},
-		{"a\"b"}, {"a\u2028b"}, {"a\u2029b"}, {"\u00ad"}, {"\ufffd"}, {"\U00016ea0"},
-		{string([]byte{0xed, 0xa0, 0x80})}, {strings.Repeat("a", 101)}, {strings.Repeat("𐐀", 51)},
-	} {
-		if _, err := PrepareDictionary(input); err == nil {
-			t.Errorf("accepted invalid dictionary %#v", input)
-		}
-	}
-	for _, word := range []string{strings.Repeat("a", 100), strings.Repeat("𐐀", 50)} {
-		if _, err := PrepareDictionary([]string{word}); err != nil {
-			t.Errorf("rejected allowed UTF-16 length: %v", err)
-		}
-	}
-	input := []string{"É", "a", "E\u0301", "A"}
-	got := prepared(t, input...)
-	input[0] = "mutated"
-	want := prepared(t, "a", "é")
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("case normalization/dedup or input isolation failed: %#v", got)
-	}
-	got.Words[0] = "mutated"
-	if prepared(t, "a", "é").Words[0] != "a" {
-		t.Fatal("dictionary preparation shared mutable output")
-	}
-}
-
-func TestValidID(t *testing.T) {
-	for _, id := range []string{"", "aaa", "aaaaa", "AAAA\n", "abcd=", "ab/c", "éééé", "AA.A", "AA!A", "A[AA", "a`aa", "AA:A"} {
-		if ValidID(id) {
-			t.Errorf("accepted %q", id)
-		}
-	}
-	for _, id := range []string{"abcd", "0dMf", "_-AZ", "0199", "azAZ"} {
-		if !ValidID(id) {
-			t.Errorf("rejected %q", id)
-		}
-	}
-}
-
-func TestPublishedCatalogAndImmutableLookup(t *testing.T) {
-	loaded, err := Load(os.DirFS("../../data"))
+	files, err := os.ReadDir("../../data")
 	if err != nil {
 		t.Fatal(err)
 	}
-	seed, err := os.ReadFile("../../data/versions/v2.json")
+	if len(files) != 1 || files[0].Name() != "catalog.json" {
+		t.Fatal("data must contain only one Git-managed catalog")
+	}
+	raw, err := os.ReadFile("../../data/catalog.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(loaded.Current) != string(seed) {
-		t.Fatal("published catalog was changed while loading")
-	}
-	var catalog struct {
-		Rules []struct{ Word, Category string }
-	}
-	if err := json.Unmarshal(loaded.Current, &catalog); err != nil {
+	var expected, got map[string]any
+	if err := json.Unmarshal(raw, &expected); err != nil {
 		t.Fatal(err)
 	}
-	words := []string{}
+	if err := json.Unmarshal(c.Body(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, expected) {
+		t.Fatal("functional fields were lost")
+	}
+	rules := got["rules"].([]any)
+	if len(rules) != 22 || len(got["variants"].([]any)) != 22 {
+		t.Fatal("complete source catalog not retained")
+	}
 	banwords := 0
-	for _, rule := range catalog.Rules {
-		words = append(words, rule.Word)
-		if rule.Category == "banword" {
+	for _, entry := range rules {
+		rule := entry.(map[string]any)
+		if len(rule) != 5 || rule["replaceMode"] != "word" {
+			t.Fatal("functional rule modes missing")
+		}
+		if rule["category"] == "banword" {
 			banwords++
 		}
+		want := "substring"
+		if rule["word"] == "Денчик" || rule["word"] == "жид" {
+			want = "word"
+		}
+		if rule["matchMode"] != want {
+			t.Fatal("published matching policy changed")
+		}
 	}
-	if len(words) != 22 || banwords != 21 {
-		t.Fatal("the complete 22-rule catalog must be retained")
+	if banwords != 21 {
+		t.Fatal("original categories changed")
 	}
-	dictionary := prepared(t, words...)
-	if dictionary.ID != "0dMf" || !slices.Contains(dictionary.Words, "денчик") {
-		t.Fatalf("historical catalog ID changed: %#v", dictionary)
-	}
-	matches := loaded.Lookup("0dMf")
-	if !reflect.DeepEqual(matches, []Dictionary{dictionary}) {
-		t.Fatalf("lookup differs: %#v", matches)
-	}
-	matches[0].ID, matches[0].Digest, matches[0].Words[0] = "bad", "bad", "bad"
-	if !reflect.DeepEqual(loaded.Lookup("0dMf"), []Dictionary{dictionary}) {
-		t.Fatal("a caller mutated the immutable index")
-	}
-	if got := loaded.Lookup("zzzz"); got == nil || len(got) != 0 {
-		t.Fatalf("unknown lookup must produce an empty array: %#v", got)
-	}
-	loaded.Current[0] = '!'
-	if loaded.Lookup("0dMf")[0].ID != "0dMf" {
-		t.Fatal("public catalog bytes share mutable index state")
+	sum := sha256.Sum256(c.Body())
+	if c.Hash() != hex.EncodeToString(sum[:]) || len(c.Hash()) != 64 {
+		t.Fatal("hash does not cover exact body bytes")
 	}
 }
 
-func TestHistoricalVersionsAndRealCollisionLimit(t *testing.T) {
-	loaded, err := Load(catalogFS(t, []string{"old", "new", "OLD"}, "v2"))
+func TestStableWireHashAndImmutableSnapshot(t *testing.T) {
+	one := loaded(t, ruleCatalog())
+	pretty, err := json.MarshalIndent(ruleCatalog(), "", "  ")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(loaded.Current), `"new"`) {
-		t.Fatal("current catalog does not follow manifest.current")
-	}
-	aliases := catalogFS(t, []string{"old", "new"}, "v1")
-	aliases["manifest.json"].Data = []byte(`{"current":"v1","versions":["v1","v2"],"Current":"v2","Versions":["v3"]}`)
-	withAliases, err := Load(aliases)
-	if err != nil || !strings.Contains(string(withAliases.Current), `"old"`) {
-		t.Fatalf("case aliases changed the exact manifest fields: %v", err)
-	}
-	for _, word := range []string{"old", "new"} {
-		dictionary := prepared(t, word)
-		if !reflect.DeepEqual(loaded.Lookup(dictionary.ID), []Dictionary{dictionary}) {
-			t.Fatal("old versions were lost or canonical duplicates retained")
-		}
-	}
-	raw, err := os.ReadFile("testdata/collision-nine.json")
+	two, err := loadBytes(append([]byte(" \n"), pretty...))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var fixture struct {
-		ID    string
-		Words []string
+	// Equivalent property order and numeric notation have the same JSON meaning.
+	reordered := []byte(`{"rules":[{"replaceMode":"word","matchMode":"word","variantIds":[0.0],"category":"safe","word":"Part"},{"category":"banword","word":"Other","variantIds":[1],"replaceMode":"match","matchMode":"substring"}],"version":1.0,"format":"saypatch-rules","variants":["first","second"]}`)
+	three, err := loadBytes(reordered)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := json.Unmarshal(raw, &fixture); err != nil || len(fixture.Words) != 9 {
-		t.Fatalf("invalid real SHA24 collision fixture: %v", err)
+	if one.Hash() != two.Hash() || one.Hash() != three.Hash() || string(one.Body()) != string(three.Body()) {
+		t.Fatal("formatting or key order changed freshness")
 	}
-	for _, word := range fixture.Words {
-		if prepared(t, word).ID != fixture.ID {
-			t.Fatal("fixture does not contain a real SHA24 collision")
-		}
+	body := one.Body()
+	body[0] = '!'
+	if one.Body()[0] != '{' || one.Hash() != two.Hash() {
+		t.Fatal("caller mutated the snapshot")
 	}
-	for _, count := range []int{2, 8} {
-		loaded, err := Load(catalogFS(t, fixture.Words[:count], "v1"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		matches := loaded.Lookup(fixture.ID)
-		if len(matches) != count || matches[0].Digest == matches[1].Digest {
-			t.Fatal("collision candidates were guessed or deduplicated by short ID")
-		}
-		for i, match := range matches {
-			if !reflect.DeepEqual(match.Words, []string{fixture.Words[i]}) {
-				t.Fatal("collision candidates did not retain every version")
+	var workers sync.WaitGroup
+	for range 12 {
+		workers.Go(func() {
+			for range 30 {
+				b := one.Body()
+				b[0] = '!'
+				if one.Hash() != two.Hash() {
+					t.Error("concurrent snapshot changed")
+				}
 			}
+		})
+	}
+	workers.Wait()
+}
+
+func TestHashIncludesEveryFunctionalValueAndArrayOrder(t *testing.T) {
+	base := ruleCatalog()
+	before := loaded(t, base).Hash()
+	changes := []func(map[string]any){
+		func(v map[string]any) { v["variants"].([]any)[0] = "changed" },
+		func(v map[string]any) { a := v["variants"].([]any); a[0], a[1] = a[1], a[0] },
+		func(v map[string]any) { a := v["rules"].([]any); a[0], a[1] = a[1], a[0] },
+	}
+	for key, value := range map[string]any{"word": "changed", "category": "banword", "variantIds": []any{1}, "matchMode": "substring", "replaceMode": "match"} {
+		changes = append(changes, func(v map[string]any) { v["rules"].([]any)[0].(map[string]any)[key] = value })
+	}
+	for i, change := range changes {
+		v := clone(t, base)
+		change(v)
+		if loaded(t, v).Hash() == before {
+			t.Fatalf("functional change %d did not affect hash", i)
 		}
 	}
-	if _, err := Load(catalogFS(t, fixture.Words, "v1")); err == nil || !strings.Contains(err.Error(), "too many dictionaries") {
-		t.Fatalf("ninth distinct dictionary must prevent publication: %v", err)
+	v := ruleCatalog()
+	v["rules"].([]any)[0].(map[string]any)["word"] = "E\u0301"
+	c := loaded(t, v)
+	var got map[string]any
+	json.Unmarshal(c.Body(), &got)
+	if got["rules"].([]any)[0].(map[string]any)["word"] != "E\u0301" {
+		t.Fatal("server must preserve source strings without normalization")
 	}
-	withDuplicate := append(slices.Clone(fixture.Words[:8]), fixture.Words[0])
-	if _, err := Load(catalogFS(t, withDuplicate, "v1")); err != nil {
-		t.Fatalf("identical canonical data must not consume collision slots: %v", err)
+	v["rules"].([]any)[0].(map[string]any)["word"] = "É"
+	if loaded(t, v).Hash() == c.Hash() {
+		t.Fatal("hash must follow exact functional source content")
 	}
 }
 
-func TestInvalidManifestAndSeedFiles(t *testing.T) {
-	for _, manifest := range []any{
-		nil, false, 1, "x", []any{}, map[string]any{},
-		map[string]any{"current": "v1", "versions": []any{}},
-		map[string]any{"Current": "v1", "Versions": []string{"v1"}},
-		map[string]any{"Current": "v1", "versions": []string{"v1"}},
-		map[string]any{"current": "v1", "Versions": []string{"v1"}},
-		map[string]any{"current": "v1", "versions": []any{nil}},
-		map[string]any{"current": "v2", "versions": []string{"v1"}},
-		map[string]any{"current": "v1", "versions": []string{"v1", "v1"}},
-		map[string]any{"current": "v1", "versions": make([]string, 65)},
-	} {
-		files := fstest.MapFS{"manifest.json": &fstest.MapFile{Data: encoded(t, manifest)}}
-		if _, err := Load(files); err == nil {
-			t.Errorf("accepted invalid manifest %#v", manifest)
-		}
-	}
-	for _, version := range []string{"../escape", "v0", "v01", "v1000000", "v1\n"} {
-		files := fstest.MapFS{"manifest.json": &fstest.MapFile{Data: encoded(t, map[string]any{"current": version, "versions": []string{version}})}}
-		if _, err := Load(files); err == nil {
-			t.Errorf("accepted invalid version %q", version)
-		}
-	}
-	if _, err := Load(fstest.MapFS{}); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("missing manifest error lost: %v", err)
-	}
-	missing := catalogFS(t, []string{"word"}, "v1")
-	delete(missing, "versions/v1.json")
-	if _, err := Load(missing); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("missing version error lost: %v", err)
-	}
-	for _, raw := range [][]byte{[]byte("{"), {0xff}, []byte(strings.Repeat(" ", MaxFileBytes+1))} {
-		for _, name := range []string{"manifest.json", "versions/v1.json"} {
-			files := catalogFS(t, []string{"word"}, "v1")
-			files[name] = &fstest.MapFile{Data: raw}
-			if _, err := Load(files); err == nil {
-				t.Errorf("accepted invalid seed %s", name)
-			}
-		}
-	}
-}
-
-func TestCatalogValidation(t *testing.T) {
-	variants := func(value any) map[string]any { c := ruleCatalog("word"); c["variants"] = value; return c }
-	rules := func(value any) map[string]any { c := ruleCatalog("word"); c["rules"] = value; return c }
-	for _, value := range []any{
-		nil, false, 1, "x", []any{}, map[string]any{},
-		variants(nil), variants([]any{}), variants([]any{nil}), variants([]any{1}),
-		variants([]any{""}), variants([]any{" \ufeff\u2028"}), variants([]any{strings.Repeat("x", 101)}),
-		variants(make([]any, 2501)), rules(nil), rules(1), rules([]any{}), rules(make([]any, 51)),
-		rules([]any{nil}), rules([]any{1}), rules([]any{"word"}),
-	} {
-		if _, err := validateCatalog(encoded(t, value), true); err == nil {
-			t.Errorf("accepted invalid catalog %#v", value)
-		}
-	}
-	for key, value := range map[string]any{"format": "other", "version": 2} {
-		c := ruleCatalog("word")
-		c[key] = value
-		if _, err := validateCatalog(encoded(t, c), true); err == nil {
-			t.Errorf("accepted invalid %s", key)
+func TestInvalidCatalogAndUnknownFields(t *testing.T) {
+	for _, value := range []any{nil, false, 1, "x", []any{}, map[string]any{}} {
+		if _, err := loadBytes(encoded(t, value)); err == nil {
+			t.Errorf("accepted invalid root %#v", value)
 		}
 	}
 	for _, override := range []map[string]any{
-		{"word": nil}, {"word": ""}, {"word": "x x"}, {"word": strings.Repeat("x", 51)}, {"word": strings.Repeat("𐐀", 26)},
-		{"category": nil}, {"category": "other"}, {"variantIds": nil}, {"variantIds": []any{}}, {"variantIds": make([]int, 51)},
-		{"variantIds": []any{nil}}, {"variantIds": []any{"0"}}, {"variantIds": []any{-1}}, {"variantIds": []any{0.1}}, {"variantIds": []any{1}},
-		{"matchMode": nil}, {"matchMode": "other"}, {"replaceMode": nil}, {"replaceMode": "other"}, {"encode": nil}, {"encode": "true"},
+		{"format": "other"}, {"version": 2}, {"variants": nil}, {"variants": []any{}}, {"variants": []any{nil}},
+		{"variants": []any{1}}, {"variants": []any{""}}, {"variants": []any{" \ufeff\u2028"}}, {"variants": []any{strings.Repeat("x", 101)}},
+		{"variants": make([]any, 2501)}, {"rules": nil}, {"rules": 1}, {"rules": []any{}}, {"rules": make([]any, 51)},
+		{"rules": []any{nil}}, {"rules": []any{1}}, {"rules": []any{"x"}}, {"unexpected": true}, {"encodingEnabled": false},
 	} {
-		catalog := ruleCatalog("word")
-		rule := catalog["rules"].([]any)[0].(map[string]any)
-		for key, value := range override {
-			rule[key] = value
+		v := ruleCatalog()
+		for k, val := range override {
+			v[k] = val
 		}
-		files := catalogFS(t, []string{"word"}, "v1")
-		files["versions/v1.json"].Data = encoded(t, catalog)
-		if _, err := Load(files); err == nil {
-			t.Errorf("accepted invalid rule override %#v", override)
+		if _, err := loadBytes(encoded(t, v)); err == nil {
+			t.Errorf("accepted invalid catalog %#v", override)
 		}
 	}
-	valid := ruleCatalog(strings.Repeat("𐐀", 25))
-	valid["variants"] = []any{"\u0085"} // JS trim does not remove NEL.
-	rule := valid["rules"].([]any)[0].(map[string]any)
-	rule["matchMode"], rule["replaceMode"] = "substring", "match"
-	if _, err := validateCatalog(encoded(t, valid), true); err != nil {
-		t.Fatalf("valid functional modes, NEL and UTF-16 length rejected: %v", err)
+	for _, override := range []map[string]any{
+		{"word": nil}, {"word": ""}, {"word": "a b"}, {"word": "<script>"}, {"word": "a\n"}, {"word": strings.Repeat("a", 51)},
+		{"word": strings.Repeat("𐐀", 26)}, {"category": nil}, {"category": "other"}, {"variantIds": nil}, {"variantIds": []any{}},
+		{"variantIds": make([]any, 51)}, {"variantIds": []any{nil}}, {"variantIds": []any{"0"}}, {"variantIds": []any{-1}},
+		{"variantIds": []any{0.1}}, {"variantIds": []any{2}}, {"matchMode": nil}, {"matchMode": "other"}, {"replaceMode": nil},
+		{"replaceMode": "other"}, {"unexpected": true}, {"encode": false}, {"encodingEnabled": false},
+	} {
+		v := ruleCatalog()
+		r := v["rules"].([]any)[0].(map[string]any)
+		for k, val := range override {
+			r[k] = val
+		}
+		if _, err := loadBytes(encoded(t, v)); err == nil {
+			t.Errorf("accepted invalid rule %#v", override)
+		}
 	}
-	if _, err := validateCatalog([]byte("{"), true); err == nil {
-		t.Fatal("invalid JSON accepted")
+	for _, name := range []string{"matchMode", "replaceMode"} {
+		v := ruleCatalog()
+		delete(v["rules"].([]any)[0].(map[string]any), name)
+		if _, err := loadBytes(encoded(t, v)); err == nil {
+			t.Fatalf("accepted missing mode %s", name)
+		}
+	}
+	valid := ruleCatalog()
+	valid["variants"] = []any{"\u0085", "second"}
+	valid["rules"].([]any)[0].(map[string]any)["word"] = strings.Repeat("𐐀", 25)
+	loaded(t, valid)
+}
+
+func TestFileAndCanonicalResponseBounds(t *testing.T) {
+	if _, err := Load(fstest.MapFS{}); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing catalog: %v", err)
+	}
+	for _, raw := range [][]byte{[]byte("{"), {0xff}, []byte(strings.Repeat(" ", MaxFileBytes+1)), []byte(`{"version":1e400}`)} {
+		if _, err := loadBytes(raw); err == nil {
+			t.Fatal("accepted malformed or oversized file")
+		}
+	}
+	// A small source with HTML characters can grow during deterministic JSON
+	// encoding; bound the actual wire bytes as well as the source file.
+	v := ruleCatalog()
+	variants := make([]any, 220)
+	for i := range variants {
+		variants[i] = strings.Repeat("<", 50)
+	}
+	v["variants"] = variants
+	body := string(encoded(t, v))
+	body = strings.ReplaceAll(body, `\u003c`, "<")
+	if len(body) >= MaxFileBytes {
+		t.Fatal("fixture must be below source limit")
+	}
+	if _, err := loadBytes([]byte(body)); err == nil || !strings.Contains(err.Error(), "response too large") {
+		t.Fatalf("wire response limit not enforced: %v", err)
 	}
 }
 
@@ -373,35 +259,9 @@ func (f *failingFS) Open(string) (fs.File, error) { return &failingFile{f}, nil 
 func (f *failingFile) Read([]byte) (int, error)   { return 0, errors.New("injected read failure") }
 func (f *failingFile) Close() error               { f.owner.closed = true; return nil }
 func (f *failingFile) Stat() (fs.FileInfo, error) { return nil, errors.New("unused stat") }
-
 func TestReadFailureClosesFile(t *testing.T) {
-	fsys := &failingFS{}
-	if _, err := Load(fsys); err == nil || !strings.Contains(err.Error(), "injected read failure") || !fsys.closed {
-		t.Fatalf("read error did not close the file: %v, closed=%v", err, fsys.closed)
-	}
-}
-
-func TestConcurrentCanonicalizationAndLookup(t *testing.T) {
-	catalog, err := Load(os.DirFS("../../data"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := prepared(t, "ΟΣ", "İ", "E\u0301")
-	var workers sync.WaitGroup
-	for range 24 {
-		workers.Go(func() {
-			for range 50 {
-				got, err := PrepareDictionary([]string{"ΟΣ", "İ", "E\u0301"})
-				if err != nil || !reflect.DeepEqual(got, want) {
-					t.Errorf("concurrent canonicalization differs: %v", err)
-				}
-				matches := catalog.Lookup("0dMf")
-				matches[0].Words[0] = "caller-local mutation"
-			}
-		})
-	}
-	workers.Wait()
-	if len(catalog.Lookup("0dMf")) != 1 {
-		t.Fatal("concurrent callers corrupted the catalog")
+	f := &failingFS{}
+	if _, err := Load(f); err == nil || !f.closed {
+		t.Fatalf("read failure must close file: %v", err)
 	}
 }

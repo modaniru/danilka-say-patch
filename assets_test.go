@@ -7,15 +7,13 @@ import (
 )
 
 func TestEmbeddedAssets(t *testing.T) {
-	data, err := fs.ReadFile(BundledData(), "manifest.json")
-	if err != nil || !json.Valid(data) {
-		t.Fatalf("bundled manifest: %s %v", data, err)
+	catalog, err := fs.ReadFile(BundledData(), "catalog.json")
+	if err != nil || !json.Valid(catalog) {
+		t.Fatalf("bundled catalog: %v", err)
 	}
-	for _, version := range []string{"v1", "v2"} {
-		seed, err := fs.ReadFile(BundledData(), "versions/"+version+".json")
-		if err != nil || !json.Valid(seed) {
-			t.Fatalf("bundled seed %s: %v", version, err)
-		}
+	files, err := fs.ReadDir(BundledData(), ".")
+	if err != nil || len(files) != 1 || files[0].Name() != "catalog.json" {
+		t.Fatal("only one active catalog must be embedded")
 	}
 	if !json.Valid(OpenAPI) {
 		t.Fatal("OpenAPI is not valid JSON")

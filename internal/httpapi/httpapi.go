@@ -8,41 +8,38 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/modaniru/danilka-say-patch/internal/auth"
 	"github.com/modaniru/danilka-say-patch/internal/catalog"
 )
 
 const (
-	CatalogPath      = "/api/banwords/catalog"
-	DictionaryPath   = "/api/banwords/dictionaries/{id}"
-	OpenAPIPath      = "/api/banwords/openapi.json"
-	DocsPath         = "/api/banwords/docs"
-	HealthPath       = "/healthz"
-	dictionaryPrefix = "/api/banwords/dictionaries/"
+	CatalogPath = "/api/banwords/catalog"
+	HashPath    = "/api/banwords/catalog/hash"
+	OpenAPIPath = "/api/banwords/openapi.json"
+	HealthPath  = "/healthz"
 )
 
 // Routes enumerates exactly the operations documented in openapi.json.
-var Routes = [...]string{CatalogPath, DictionaryPath, OpenAPIPath, DocsPath, HealthPath}
+var Routes = [...]string{CatalogPath, HashPath, OpenAPIPath, HealthPath}
 
-type Catalog interface {
-	Lookup(string) []catalog.Dictionary
-}
 type Verifier interface {
 	Verify(context.Context, string) (auth.Claims, error)
 }
 
 type Options struct {
-	Catalog  Catalog
-	Current  json.RawMessage
+	Catalog  *catalog.Catalog
 	Verifier Verifier
 	OpenAPI  []byte
 	Limiter  *RateLimiter
 	Logger   *slog.Logger
 }
 
-type handler struct{ opts Options }
+type handler struct {
+	opts Options
+	body []byte
+	hash string
+}
 
 func New(opts Options) http.Handler {
 	if opts.Limiter == nil {
@@ -51,10 +48,9 @@ func New(opts Options) http.Handler {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
-	// Snapshot caller-owned byte slices so later mutations cannot alter responses.
-	opts.Current = append(json.RawMessage(nil), opts.Current...)
+	// Snapshot caller-owned OpenAPI bytes and the immutable loaded catalog.
 	opts.OpenAPI = append([]byte(nil), opts.OpenAPI...)
-	return &handler{opts: opts}
+	return &handler{opts: opts, body: opts.Catalog.Body(), hash: opts.Catalog.Hash()}
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -69,11 +65,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) serve(w http.ResponseWriter, r *http.Request) {
-	// Match the escaped path: %2F within an id is malformed input (400), not
-	// another route. This preserves the existing JavaScript server's URL behavior.
 	path := r.URL.EscapedPath()
-	id, dictionary := strings.CutPrefix(path, dictionaryPrefix)
-	dictionary = dictionary && id != "" && !strings.Contains(id, "/")
 	if path == HealthPath {
 		if !allowGET(w, r) {
 			return
@@ -81,7 +73,8 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if !dictionary && path != CatalogPath && path != OpenAPIPath && path != DocsPath {
+	data := path == CatalogPath || path == HashPath
+	if !data && path != OpenAPIPath {
 		writeError(w, http.StatusNotFound, "не найдено")
 		return
 	}
@@ -103,6 +96,12 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// A signed session JWT, including superadmin, cannot read catalog data.
+	// The credential marker is issued only after auth verifies a service token.
+	if data && user.Credential != "service-token" {
+		writeError(w, http.StatusNotFound, "не найдено")
+		return
+	}
 	if retry := h.opts.Limiter.Take(user.Subject); retry != 0 {
 		w.Header().Set("Retry-After", strconv.Itoa(retry))
 		writeError(w, http.StatusTooManyRequests, "слишком много запросов")
@@ -111,33 +110,19 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request) {
 	if !allowGET(w, r) {
 		return
 	}
-	if dictionary {
-		if !catalog.ValidID(id) {
-			writeError(w, http.StatusBadRequest, "некорректный идентификатор словаря")
-			return
-		}
-		dictionaries := h.opts.Catalog.Lookup(id)
-		if len(dictionaries) == 0 {
-			writeError(w, http.StatusNotFound, "не найдено")
-			return
-		}
-		h.writeJSON(w, struct {
-			Protocol     string               `json:"protocol"`
-			ID           string               `json:"id"`
-			Dictionaries []catalog.Dictionary `json:"dictionaries"`
-		}{"sp/1", id, dictionaries})
-		return
-	}
 	switch path {
 	case CatalogPath:
-		h.writeJSON(w, h.opts.Current)
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("ETag", `"`+h.hash+`"`)
+		w.WriteHeader(http.StatusOK)
+		// No second JSON encoding: Hash/ETag cover these exact response bytes.
+		_, _ = w.Write(h.body)
+	case HashPath:
+		h.writeJSON(w, struct {
+			Hash string `json:"hash"`
+		}{h.hash})
 	case OpenAPIPath:
 		h.writeJSON(w, json.RawMessage(h.opts.OpenAPI))
-	case DocsPath:
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(docs))
 	}
 }
 
@@ -175,14 +160,3 @@ func (h *handler) internalError(w http.ResponseWriter) {
 	h.opts.Logger.Error("request failed")
 	writeError(w, http.StatusInternalServerError, "внутренняя ошибка")
 }
-
-const docs = `<!doctype html><html lang="ru"><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Banwords API — OpenAPI</title>
-<style>body{font:16px system-ui;max-width:880px;margin:3rem auto;padding:0 1rem;line-height:1.6}code{background:#eee;padding:.2rem}table{border-collapse:collapse}td,th{padding:.6rem;text-align:left;border-bottom:1px solid #ccc}</style>
-<h1>Banwords API</h1><p>Спецификация <a href="/api/banwords/openapi.json">OpenAPI 3.1 (Swagger)</a> доступна без внешних ресурсов.</p>
-<p>Клиент передаёт <code>Authorization: Bearer bw_…</code> в Caddy. Auth проверяет токен и текущие права владельца, а сервис на Go проверяет внутренний JWT. Нужно право <code>banwords:dictionaries:read</code>.</p>
-<table><tr><th>Метод</th><th>Путь</th><th>Ответ</th></tr>
-<tr><td>GET</td><td><a href="/api/banwords/catalog">/api/banwords/catalog</a></td><td>Полный каталог saypatch-rules: слова, варианты, категории и явные matchMode/replaceMode</td></tr>
-<tr><td>GET</td><td>/api/banwords/dictionaries/{id}</td><td>Все словари с коротким hash1; коллизия не выбирается автоматически</td></tr>
-</table><p>Неизвестный словарь: 404; неверный hash1: 400; лимит: 429; временно недоступный auth: 503. Слова и текст сообщений не передаются в запросе.</p></html>`

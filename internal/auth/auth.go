@@ -29,6 +29,7 @@ const (
 )
 
 type Claims struct {
+	Credential  string
 	Subject     string
 	Issuer      string
 	Audience    string
@@ -267,11 +268,19 @@ func validClaims(raw map[string]json.RawMessage, now time.Time) (Claims, bool) {
 			}
 		}
 	}
+	credential := ""
+	if value, exists := raw["credential"]; exists {
+		var valid bool
+		credential, valid = stringValue(value)
+		if !valid || credential != "service-token" {
+			return Claims{}, false
+		}
+	}
 	var permissions []json.RawMessage
 	if json.Unmarshal(raw["perms"], &permissions) != nil || len(permissions) > 128 {
 		return Claims{}, false
 	}
-	result := Claims{Subject: subject, Issuer: issuer, Audience: audience, ExpiresAt: expires, Permissions: make([]string, 0, len(permissions))}
+	result := Claims{Credential: credential, Subject: subject, Issuer: issuer, Audience: audience, ExpiresAt: expires, Permissions: make([]string, 0, len(permissions))}
 	allowed := false
 	for _, rawPermission := range permissions {
 		permission, valid := stringValue(rawPermission)

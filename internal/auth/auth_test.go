@@ -479,3 +479,26 @@ func TestDefaultsAndRedirects(t *testing.T) {
 		t.Fatal("original redirect policy was used")
 	}
 }
+
+func TestCredentialMarkerIsOptionalForMetadataAndStrictWhenPresent(t *testing.T) {
+	f := signing(t, "credential")
+	v := testVerifier(t, f, nil)
+	for _, perms := range [][]string{{"banwords:dictionaries:read"}, {"superadmin"}} {
+		session, err := v.Verify(context.Background(), f.token(t, map[string]any{"perms": perms}, nil))
+		if err != nil || session.Credential != "" {
+			t.Fatal("session claims changed")
+		}
+		service, err := v.Verify(context.Background(), f.token(t, map[string]any{"perms": perms, "credential": "service-token"}, nil))
+		if err != nil || service.Credential != "service-token" {
+			t.Fatal("service credential lost")
+		}
+	}
+	for _, value := range []any{nil, false, 1, "", "session", "cookie", "Service-Token", []any{"service-token"}} {
+		rejected(t, v, f.token(t, map[string]any{"credential": value}, nil), ErrInvalidToken)
+	}
+	// A case alias does not mark a session as service-token.
+	got, err := v.Verify(context.Background(), f.token(t, map[string]any{"Credential": "service-token"}, nil))
+	if err != nil || got.Credential != "" {
+		t.Fatal("case-insensitive credential alias accepted")
+	}
+}
