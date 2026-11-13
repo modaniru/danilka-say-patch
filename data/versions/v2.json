@@ -1,0 +1,228 @@
+{
+  "format": "saypatch-rules",
+  "version": 1,
+  "variants": [
+    "Даня",
+    "BW-1",
+    "BW-2",
+    "BW-3",
+    "BW-4",
+    "BW-5",
+    "BW-6",
+    "BW-7",
+    "BW-8",
+    "BW-9",
+    "BW-10",
+    "BW-11",
+    "BW-12",
+    "BW-13",
+    "BW-27",
+    "BW-29",
+    "BW-33",
+    "BW-34",
+    "BW-35",
+    "BW-36",
+    "BW-37",
+    "BW-38"
+  ],
+  "rules": [
+    {
+      "word": "Денчик",
+      "category": "safe",
+      "variantIds": [
+        0
+      ],
+      "matchMode": "word",
+      "replaceMode": "word"
+    },
+    {
+      "word": "ниггер",
+      "category": "banword",
+      "variantIds": [
+        1
+      ],
+      "matchMode": "substring",
+      "replaceMode": "word"
+    },
+    {
+      "word": "nigger",
+      "category": "banword",
+      "variantIds": [
+        2
+      ],
+      "matchMode": "substring",
+      "replaceMode": "word"
+    },
+    {
+      "word": "nigga",
+      "category": "banword",
+      "variantIds": [
+        3
+      ],
+      "matchMode": "substring",
+      "replaceMode": "word"
+    },
+    {
+      "word": "пидор",
+      "category": "banword",
+      "variantIds": [
+        4
+      ],
+      "matchMode": "substring",
+      "replaceMode": "word"
+    },
+    {
+      "word": "пидорас",
+      "category": "banword",
+      "variantIds": [
+        5
+      ],
+      "matchMode": "substring",
+      "replaceMode": "word"
+    },
+    {
+      "word": "пидораст",
+      "category": "banword",
+      "variantIds": [
+        6
+      ],
+      "matchMode": "substring",
+      "replaceMode": "word"
+    },
+    {
+      "word": "faggot",
+      "category": "banword",
+      "variantIds": [
+        7
+      ],
+      "matchMode": "substring",
+      "replaceMode": "word"
+    },
+    {
+      "word": "хач",
+      "category": "banword",
+      "variantIds": [
+        8
+      ],
+      "matchMode": "substring",
+      "replaceMode": "word"
+    },
+    {
+      "word": "чурка",
+      "category": "banword",
+      "variantIds": [
+        9
+      ],
+      "matchMode": "substring",
+      "replaceMode": "word"
+    },
+    {
+      "word": "жид",
+      "category": "banword",
+      "matchMode": "word",
+      "variantIds": [
+        10
+      ],
+      "replaceMode": "word"
+    },
+    {
+      "word": "хохол",
+      "category": "banword",
+      "variantIds": [
+        11
+      ],
+      "matchMode": "substring",
+      "replaceMode": "word"
+    },
+    {
+      "word": "кацап",
+      "category": "banword",
+      "variantIds": [
+        12
+      ],
+      "matchMode": "substring",
+      "replaceMode": "word"
+    },
+    {
+      "word": "москаль",
+      "category": "banword",
+      "variantIds": [
+        13
+      ],
+      "matchMode": "substring",
+      "replaceMode": "word"
+    },
+    {
+      "word": "педик",
+      "category": "banword",
+      "variantIds": [
+        14
+      ],
+      "matchMode": "substring",
+      "replaceMode": "word"
+    },
+    {
+      "word": "аутист",
+      "category": "banword",
+      "variantIds": [
+        15
+      ],
+      "matchMode": "substring",
+      "replaceMode": "word"
+    },
+    {
+      "word": "нига",
+      "category": "banword",
+      "variantIds": [
+        16
+      ],
+      "matchMode": "substring",
+      "replaceMode": "word"
+    },
+    {
+      "word": "нигга",
+      "category": "banword",
+      "variantIds": [
+        17
+      ],
+      "matchMode": "substring",
+      "replaceMode": "word"
+    },
+    {
+      "word": "черномазый",
+      "category": "banword",
+      "variantIds": [
+        18
+      ],
+      "matchMode": "substring",
+      "replaceMode": "word"
+    },
+    {
+      "word": "черножопый",
+      "category": "banword",
+      "variantIds": [
+        19
+      ],
+      "matchMode": "substring",
+      "replaceMode": "word"
+    },
+    {
+      "word": "нигер",
+      "category": "banword",
+      "variantIds": [
+        20
+      ],
+      "matchMode": "substring",
+      "replaceMode": "word"
+    },
+    {
+      "word": "негры",
+      "category": "banword",
+      "variantIds": [
+        21
+      ],
+      "matchMode": "substring",
+      "replaceMode": "word"
+    }
+  ]
+}

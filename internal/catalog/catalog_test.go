@@ -30,7 +30,7 @@ func ruleCatalog(word string) map[string]any {
 	return map[string]any{
 		"format": "saypatch-rules", "version": 1,
 		"variants": []any{"replacement"},
-		"rules":    []any{map[string]any{"word": word, "category": "banword", "variantIds": []any{0}}},
+		"rules":    []any{map[string]any{"word": word, "category": "banword", "variantIds": []any{0}, "matchMode": "substring", "replaceMode": "word"}},
 	}
 }
 
@@ -169,7 +169,7 @@ func TestPublishedCatalogAndImmutableLookup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	seed, err := os.ReadFile("../../data/versions/v1.json")
+	seed, err := os.ReadFile("../../data/versions/v2.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,14 +326,14 @@ func TestCatalogValidation(t *testing.T) {
 		variants(make([]any, 2501)), rules(nil), rules(1), rules([]any{}), rules(make([]any, 51)),
 		rules([]any{nil}), rules([]any{1}), rules([]any{"word"}),
 	} {
-		if _, err := validateCatalog(encoded(t, value)); err == nil {
+		if _, err := validateCatalog(encoded(t, value), true); err == nil {
 			t.Errorf("accepted invalid catalog %#v", value)
 		}
 	}
 	for key, value := range map[string]any{"format": "other", "version": 2} {
 		c := ruleCatalog("word")
 		c[key] = value
-		if _, err := validateCatalog(encoded(t, c)); err == nil {
+		if _, err := validateCatalog(encoded(t, c), true); err == nil {
 			t.Errorf("accepted invalid %s", key)
 		}
 	}
@@ -357,11 +357,11 @@ func TestCatalogValidation(t *testing.T) {
 	valid := ruleCatalog(strings.Repeat("𐐀", 25))
 	valid["variants"] = []any{"\u0085"} // JS trim does not remove NEL.
 	rule := valid["rules"].([]any)[0].(map[string]any)
-	rule["matchMode"], rule["replaceMode"], rule["encode"] = "substring", "match", false
-	if _, err := validateCatalog(encoded(t, valid)); err != nil {
-		t.Fatalf("valid optional modes, NEL and UTF-16 length rejected: %v", err)
+	rule["matchMode"], rule["replaceMode"] = "substring", "match"
+	if _, err := validateCatalog(encoded(t, valid), true); err != nil {
+		t.Fatalf("valid functional modes, NEL and UTF-16 length rejected: %v", err)
 	}
-	if _, err := validateCatalog([]byte("{")); err == nil {
+	if _, err := validateCatalog([]byte("{"), true); err == nil {
 		t.Fatal("invalid JSON accepted")
 	}
 }

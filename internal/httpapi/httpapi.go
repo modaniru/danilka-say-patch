@@ -183,6 +183,6 @@ const docs = `<!doctype html><html lang="ru"><meta charset="utf-8">
 <h1>Banwords API</h1><p>Спецификация <a href="/api/banwords/openapi.json">OpenAPI 3.1 (Swagger)</a> доступна без внешних ресурсов.</p>
 <p>Клиент передаёт <code>Authorization: Bearer bw_…</code> в Caddy. Auth проверяет токен и текущие права владельца, а сервис на Go проверяет внутренний JWT. Нужно право <code>banwords:dictionaries:read</code>.</p>
 <table><tr><th>Метод</th><th>Путь</th><th>Ответ</th></tr>
-<tr><td>GET</td><td><a href="/api/banwords/catalog">/api/banwords/catalog</a></td><td>Текущий каталог saypatch-rules</td></tr>
+<tr><td>GET</td><td><a href="/api/banwords/catalog">/api/banwords/catalog</a></td><td>Полный каталог saypatch-rules: слова, варианты, категории и явные matchMode/replaceMode</td></tr>
 <tr><td>GET</td><td>/api/banwords/dictionaries/{id}</td><td>Все словари с коротким hash1; коллизия не выбирается автоматически</td></tr>
 </table><p>Неизвестный словарь: 404; неверный hash1: 400; лимит: 429; временно недоступный auth: 503. Слова и текст сообщений не передаются в запросе.</p></html>`

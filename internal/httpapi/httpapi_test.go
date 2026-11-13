@@ -20,6 +20,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/modaniru/danilka-say-patch/internal/auth"
@@ -48,10 +49,11 @@ func (c fakeCatalog) Lookup(id string) []catalog.Dictionary {
 }
 func setup(t *testing.T) Options {
 	t.Helper()
-	current, err := os.ReadFile("../../data/versions/v1.json")
+	loaded, err := catalog.Load(os.DirFS("../../data"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	current := loaded.Current
 	specification, err := os.ReadFile("../../openapi.json")
 	if err != nil {
 		t.Fatal(err)
@@ -475,5 +477,98 @@ func TestSignedJWTThroughHTTPAndJWKS(t *testing.T) {
 	unavailable := request(h, "GET", CatalogPath, token)
 	if unavailable.Code != 503 || unavailable.Header().Get("Retry-After") != "5" {
 		t.Fatalf("expired JWKS cache got %d", unavailable.Code)
+	}
+}
+
+func TestFullFunctionalCatalogResponseAndSchema(t *testing.T) {
+	opts := setup(t)
+	h := New(opts)
+	response := request(h, "GET", CatalogPath, "valid")
+	value := decode(t, response.Body.Bytes()).(map[string]any)
+	if response.Code != 200 || len(value) != 4 {
+		t.Fatalf("full catalog response: %d %s", response.Code, response.Body)
+	}
+	rules := value["rules"].([]any)
+	variants := value["variants"].([]any)
+	if len(rules) != 22 || len(variants) != 22 {
+		t.Fatal("incomplete server catalog")
+	}
+	fields := []string{"category", "matchMode", "replaceMode", "variantIds", "word"}
+	for _, entry := range rules {
+		rule := entry.(map[string]any)
+		keys := make([]string, 0, len(rule))
+		for key := range rule {
+			keys = append(keys, key)
+		}
+		slices.Sort(keys)
+		if !reflect.DeepEqual(keys, fields) {
+			t.Fatalf("catalog rule includes missing or client-only fields: %#v", rule)
+		}
+		if rule["replaceMode"] != "word" {
+			t.Fatal("published replacement mode changed")
+		}
+		want := "substring"
+		if rule["word"] == "Денчик" || rule["word"] == "жид" {
+			want = "word"
+		}
+		if rule["matchMode"] != want {
+			t.Fatal("published matching policy changed")
+		}
+	}
+	spec := decode(t, opts.OpenAPI).(map[string]any)
+	if spec["info"].(map[string]any)["version"] != "1.2.0" {
+		t.Fatal("contract version not updated")
+	}
+	schemas := spec["components"].(map[string]any)["schemas"].(map[string]any)
+	catalogSchema := schemas["Catalog"].(map[string]any)
+	if catalogSchema["additionalProperties"] != false {
+		t.Fatal("catalog schema must be closed")
+	}
+	properties := catalogSchema["properties"].(map[string]any)
+	if len(properties) != 4 {
+		t.Fatal("server catalog schema includes client settings")
+	}
+	ruleSchema := properties["rules"].(map[string]any)["items"].(map[string]any)
+	if ruleSchema["additionalProperties"] != false {
+		t.Fatal("rule schema must be closed")
+	}
+	required := []string{}
+	for _, field := range ruleSchema["required"].([]any) {
+		required = append(required, field.(string))
+	}
+	slices.Sort(required)
+	if !reflect.DeepEqual(required, fields) {
+		t.Fatal("functional modes must be required in Swagger")
+	}
+	ruleProperties := ruleSchema["properties"].(map[string]any)
+	propertyNames := []string{}
+	for name := range ruleProperties {
+		propertyNames = append(propertyNames, name)
+	}
+	slices.Sort(propertyNames)
+	if !reflect.DeepEqual(propertyNames, fields) {
+		t.Fatal("rule schema includes client-only fields")
+	}
+	if !reflect.DeepEqual(ruleProperties["matchMode"].(map[string]any)["enum"], []any{"word", "substring"}) ||
+		!reflect.DeepEqual(ruleProperties["replaceMode"].(map[string]any)["enum"], []any{"word", "match"}) {
+		t.Fatal("functional mode enums changed")
+	}
+}
+
+func TestMatchedFragmentAndSubstringModesPassThroughAPI(t *testing.T) {
+	current := []byte(`{"format":"saypatch-rules","version":1,"variants":["replacement"],"rules":[{"word":"part","category":"safe","variantIds":[0],"matchMode":"substring","replaceMode":"match"}]}`)
+	files := fstest.MapFS{
+		"manifest.json":    {Data: []byte(`{"current":"v1","versions":["v1"]}`)},
+		"versions/v1.json": {Data: current},
+	}
+	loaded, err := catalog.Load(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := setup(t)
+	opts.Catalog, opts.Current = loaded, loaded.Current
+	response := request(New(opts), "GET", CatalogPath, "valid")
+	if response.Code != 200 || !reflect.DeepEqual(decode(t, response.Body.Bytes()), decode(t, current)) {
+		t.Fatal("matched-fragment replacement and substring matching must remain backend-owned functional data")
 	}
 }

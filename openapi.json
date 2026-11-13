@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Banwords dictionaries API",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "description": "Закрытый сервис словарей протокола sp/1 на Go (net/http); совместим с прежним JSON API. Внешний клиент передаёт Authorization: Bearer bw_… в Caddy. Auth проверяет opaque service-токен, его service scope и текущие права владельца, затем Caddy передаёт внутренний Ed25519 JWT в X-Auth-Token. Сервис принимает единственный заголовок X-Auth-Token и проверяет iss=danysik-auth, aud=banwords, exp и banwords:dictionaries:read (либо superadmin). Без доступа — 404. Текст сообщений не отправляется и не логируется. Изменение хендлеров требует обновления этой спецификации."
   },
   "servers": [{ "url": "https://danysik.ru" }],
@@ -11,8 +11,8 @@
     "/api/banwords/catalog": {
       "get": {
         "operationId": "getCatalog",
-        "summary": "Текущий опубликованный каталог правил",
-        "description": "Опубликованная версия saypatch-rules для локального импорта. JSON-состав и идентификаторы не изменились при переходе на Go. Запрос не публикует пользовательские слова. Каталог содержит все 22 исходных правила, включая safe-правило Денчик, чтобы сохранить существующий hash1=0dMf.",
+        "summary": "Полный опубликованный каталог функциональных правил",
+        "description": "Полный функциональный каталог saypatch-rules (wire version=1), публикация v2. Каждое правило содержит исходное слово, категорию, variantIds и явные matchMode/replaceMode; клиенту не требуется выводить режимы из категории. matchMode=substring ищет внутри слова, word — целое слово. replaceMode=match заменяет совпавший фрагмент, word — всё содержащее его слово. Каталог содержит все 22 исходных правила и прежние замены, включая safe-правило Денчик; hash1=0dMf не изменён. Исторический v1 сохранён для lookup. Схема закрытая: неизвестные поля отклоняются при публикации. Запрос не публикует пользовательские слова.",
         "responses": {
           "200": { "description": "Текущий каталог", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Catalog" } } } },
           "404": { "$ref": "#/components/responses/NotFound" },
@@ -101,12 +101,12 @@
           "format": { "const": "saypatch-rules" }, "version": { "const": 1 },
           "variants": { "type": "array", "minItems": 1, "maxItems": 2500, "items": { "type": "string", "minLength": 1, "maxLength": 100 } },
           "rules": { "type": "array", "minItems": 1, "maxItems": 50, "items": {
-            "type": "object", "required": ["word", "category", "variantIds"], "additionalProperties": false,
+            "type": "object", "required": ["word", "category", "variantIds", "matchMode", "replaceMode"], "additionalProperties": false,
             "properties": {
               "word": { "type": "string", "minLength": 1, "maxLength": 50 },
               "category": { "enum": ["safe", "banword"] },
               "variantIds": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "type": "integer", "minimum": 0, "maximum": 2499 } },
-              "matchMode": { "enum": ["word", "substring"] }, "replaceMode": { "enum": ["word", "match"] }, "encode": { "type": "boolean" }
+              "matchMode": { "enum": ["word", "substring"], "description": "word — целое слово; substring — поиск внутри слова" }, "replaceMode": { "enum": ["word", "match"], "description": "word — заменить содержащее слово целиком; match — заменить только совпавший фрагмент" }
             }
           } }
         }

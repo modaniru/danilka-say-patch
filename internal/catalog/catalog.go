@@ -179,9 +179,22 @@ func jsWhitespace(c rune) bool {
 		c == '\u2028' || c == '\u2029' || c == '\u202f' || c == '\u205f' || c == '\u3000' || c == '\ufeff'
 }
 
-func validateCatalog(raw []byte) (Dictionary, error) {
+// onlyFields applies the public schema without knowledge of client-specific flags.
+func onlyFields(value map[string]any, names ...string) bool {
+	for name := range value {
+		if !slices.Contains(names, name) {
+			return false
+		}
+	}
+	return true
+}
+
+func validateCatalog(raw []byte, complete bool) (Dictionary, error) {
 	var value map[string]any
 	if err := json.Unmarshal(raw, &value); err != nil {
+		return Dictionary{}, errors.New("invalid catalog")
+	}
+	if !onlyFields(value, "format", "version", "variants", "rules") {
 		return Dictionary{}, errors.New("invalid catalog")
 	}
 	variants, ok := value["variants"].([]any)
@@ -201,7 +214,7 @@ func validateCatalog(raw []byte) (Dictionary, error) {
 	words := make([]string, 0, len(rules))
 	for _, entry := range rules {
 		rule, ok := entry.(map[string]any)
-		if !ok {
+		if !ok || !onlyFields(rule, "word", "category", "variantIds", "matchMode", "replaceMode") {
 			return Dictionary{}, errors.New("invalid rule")
 		}
 		word, wordOK := rule["word"].(string)
@@ -218,15 +231,15 @@ func validateCatalog(raw []byte) (Dictionary, error) {
 			}
 		}
 		for field, accepted := range map[string][]string{"matchMode": {"word", "substring"}, "replaceMode": {"word", "match"}} {
-			if entry, exists := rule[field]; exists {
-				mode, ok := entry.(string)
-				if !ok || !slices.Contains(accepted, mode) {
-					return Dictionary{}, errors.New("invalid rule")
+			entry, exists := rule[field]
+			if !exists {
+				if complete {
+					return Dictionary{}, errors.New("current catalog requires explicit rule modes")
 				}
+				continue
 			}
-		}
-		if entry, exists := rule["encode"]; exists {
-			if _, ok := entry.(bool); !ok {
+			mode, ok := entry.(string)
+			if !ok || !slices.Contains(accepted, mode) {
 				return Dictionary{}, errors.New("invalid rule")
 			}
 		}
@@ -257,7 +270,9 @@ func indexDictionaries(dictionaries []Dictionary) (map[string][]Dictionary, erro
 }
 
 // Load reads all published versions before serving requests. The FS must be
-// rooted at data/, containing manifest.json and versions/vN.json.
+// rooted at data/, containing manifest.json and versions/vN.json. Every current
+// rule must declare its functional modes; legacy optional modes remain readable
+// only in historical versions.
 func Load(fsys fs.FS) (*Catalog, error) {
 	raw, err := readJSON(fsys, "manifest.json")
 	if err != nil {
@@ -295,7 +310,7 @@ func Load(fsys fs.FS) (*Catalog, error) {
 		if err != nil {
 			return nil, err
 		}
-		dictionary, err := validateCatalog(raw)
+		dictionary, err := validateCatalog(raw, version == manifest.Current)
 		if err != nil {
 			return nil, fmt.Errorf("invalid catalog %s: %w", version, err)
 		}
