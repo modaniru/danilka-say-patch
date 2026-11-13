@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Banwords dictionaries API",
-    "version": "1.0.0",
-    "description": "Закрытый сервис словарей протокола sp/1. Внешний клиент передаёт Authorization: Bearer bw_… в Caddy. Auth проверяет opaque service-токен, его service scope и текущие права владельца, затем Caddy передаёт внутренний Ed25519 JWT в X-Auth-Token. Сервис проверяет iss=danysik-auth, aud=banwords, exp и banwords:dictionaries:read (либо superadmin). Без доступа — 404. Текст сообщений не отправляется и не логируется. Изменение хендлеров требует обновления этой спецификации."
+    "version": "1.1.0",
+    "description": "Закрытый сервис словарей протокола sp/1 на Go (net/http); совместим с прежним JSON API. Внешний клиент передаёт Authorization: Bearer bw_… в Caddy. Auth проверяет opaque service-токен, его service scope и текущие права владельца, затем Caddy передаёт внутренний Ed25519 JWT в X-Auth-Token. Сервис принимает единственный заголовок X-Auth-Token и проверяет iss=danysik-auth, aud=banwords, exp и banwords:dictionaries:read (либо superadmin). Без доступа — 404. Текст сообщений не отправляется и не логируется. Изменение хендлеров требует обновления этой спецификации."
   },
   "servers": [{ "url": "https://danysik.ru" }],
   "security": [{ "serviceToken": [] }],
@@ -12,7 +12,7 @@
       "get": {
         "operationId": "getCatalog",
         "summary": "Текущий опубликованный каталог правил",
-        "description": "Точная версия saypatch-rules для локального импорта. Запрос не публикует пользовательские слова. Каталог содержит все 22 исходных правила, включая safe-правило Денчик, чтобы сохранить существующий hash1=0dMf.",
+        "description": "Опубликованная версия saypatch-rules для локального импорта. JSON-состав и идентификаторы не изменились при переходе на Go. Запрос не публикует пользовательские слова. Каталог содержит все 22 исходных правила, включая safe-правило Денчик, чтобы сохранить существующий hash1=0dMf.",
         "responses": {
           "200": { "description": "Текущий каталог", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Catalog" } } } },
           "404": { "$ref": "#/components/responses/NotFound" },

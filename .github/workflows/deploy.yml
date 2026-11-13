@@ -17,13 +17,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-go@v5
         with:
-          node-version: '22.18.0'
-          cache: npm
-      - run: npm ci --ignore-scripts
-      - run: npm run check
-      - run: npm test
+          go-version-file: go.mod
+          cache: false
+      - run: go mod verify && go mod vendor && git diff --exit-code -- vendor go.mod go.sum
+      - run: make check
+      - run: make test
 
   image:
     needs: check

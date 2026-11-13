@@ -1,7 +1,8 @@
 # banwords
 
-Сервис опубликованных словарей SayPatch для danysik.ru. Node.js 22.18+, без
-внешних runtime-зависимостей. Собственный контейнер `ghcr.io/modaniru/banwords`,
+Сервис опубликованных словарей SayPatch для danysik.ru на **Go 1.27.1**.
+HTTP и Ed25519 реализованы стандартной библиотекой; Unicode-канонизация —
+закреплённым и vendored `golang.org/x/text`. Runtime Node.js не требуется. Собственный контейнер `ghcr.io/modaniru/banwords`,
 внутри Compose слушает `8080`; наружу — только через Caddy.
 
 ## API и Swagger
@@ -21,8 +22,11 @@
 
 `id` — 4 символа Base64url первых 24 бит SHA256. `digest` — полный SHA256
 канонического JSON в hex. Канонизация совпадает с `extension/core.js`:
-NFC → JavaScript lowercase → NFC, удаление дублей, **UTF-16 Array.sort()**,
-`JSON.stringify(["sp",1,"dictionary",words])`, UTF-8. В запросах нет текста сообщений.
+NFC → полное Unicode lowercase → NFC, удаление дублей, **UTF-16 Array.sort()**,
+`JSON.stringify(["sp",1,"dictionary",words])`, UTF-8. Разрешённые символы
+зафиксированы по Unicode16 исходной Node22 реализации. Тесты проверяют все
+разрешённые code points, 2521 изменяемый символ, контекстную сигму и dotted I
+по эталонам JavaScript. В запросах нет текста сообщений.
 
 Неизвестный словарь — `404`; неправильный `id` — `400`; неподдерживаемый метод —
 `405` + `Allow: GET`; лимит — `429` + `Retry-After`; недоступные JWKS — `503`
@@ -89,7 +93,7 @@ JWKS кешируются 300 с; неизвестный `kid` иницииру�
 1. Добавить `data/versions/v2.json` с полным новым `saypatch-rules` каталогом.
 2. Добавить `v2` в `data/manifest.json.versions`, сохранив `v1` и все старые версии;
    переключить `current` на `v2`.
-3. Выполнить `npm test` и `npm run check`, собрать и выкатить новый образ обычным CI.
+3. Выполнить `make test` и `make check`, собрать и выкатить новый образ обычным CI.
 
 Все версии читаются при старте; плохой seed останавливает запуск. Поиск строится
 по всем версиям, одинаковые канонические словари дедуплицируются. Runtime API
@@ -98,26 +102,41 @@ JWKS кешируются 300 с; неизвестный `kid` иницииру�
 ## Локально и проверки
 
 ```sh
-npm test
-npm run check
-npm start
-# PORT=8080 BANWORDS_JWKS_URL=http://auth:8080/.well-known/jwks.json npm start
+make test     # Go race detector + строгие 100% statements во всех пакетах
+make check    # go vet + gofmt
+make build    # bin/banwords
+./bin/banwords
+./bin/banwords healthcheck
+# PORT=8080 BANWORDS_JWKS_URL=http://auth:8080/.well-known/jwks.json ./bin/banwords
 docker build -t banwords .
 ```
 
 Переменные: `PORT` (8080), `BANWORDS_JWKS_URL`
-(`http://auth:8080/.well-known/jwks.json`), `BANWORDS_DATA_DIR` (встроенная `data/`).
-База данных сервису не нужна; данные версионируются файлами внутри образа.
-Тесты работают с подменёнными JWKS/транспортами и локальным HTTP, без production,
-настоящего Twitch, cookie или секретов. Проверяются seed, Unicode/UTF-16,
-реальная коллизия SHA24, исторические версии, HTTP-контракт/OpenAPI, JWT,
-лимиты/отказы/кеш/ротация JWKS, таймаут, конфигурация и запуск/остановка CLI.
+(`http://auth:8080/.well-known/jwks.json`), `BANWORDS_DATA_DIR` (необязательная
+папка с manifest/versions вместо встроенных данных). По умолчанию версии и
+OpenAPI встроены через `go:embed`, поэтому бинарник работает независимо от
+текущего каталога и имени checkout. База данных сервису не нужна.
+
+`go.mod`, `go.sum` и `vendor/` фиксируют зависимости; Docker собирает статический
+бинарник с `CGO_ENABLED=0` из vendor без загрузки Go-модулей. Runtime — distroless,
+пользователь nonroot, healthcheck запускает сам бинарник. Node.js используется
+только разработчиком для обновления эталонов `internal/catalog/testdata/` при
+явном изменении версии протокола; Go-тесты и CI Node.js не требуют.
+
+Тесты работают с подменёнными JWKS/транспортами и локальным HTTP, без production
+и настоящего Twitch. Проверяются seed, Unicode/UTF-16, реальные SHA24-коллизии,
+исторические версии, HTTP/OpenAPI, JWT, rate limit, отказы/кеш/ротация JWKS,
+таймауты, отмена параллельных запросов, конфигурация и graceful shutdown CLI.
+`make test` отклоняет любой непокрытый исполняемый блок, даже если округлённое
+покрытие `go tool cover` показывает100.0%.
 
 ## Деплой
 
 По образцу `auth`: GitHub Actions → проверки → GHCR `:latest`, `:sha-*` →
 SSH с отдельным forced-command CI-ключом `ci-deploy banwords`. Репозиторий
-нового сервиса создаёт владелец; workflow не выполняется без commit/push.
+`modaniru/danilka-say-patch`; push в master запускает Go-проверки, сборку и deploy.
+Go-миграция сохраняет прежние имя образа, порт, переменные и SSH CI-ключ,
+переустановка infra и перевыпуск service-токенов не нужны.
 Инфраструктура: запись сервиса в Compose без публичных `ports`,
 `/api/banwords/*` через `auth_require banwords:dictionaries:read` в Caddy,
 CI registry и отдельный ключ в `infra/services.yml`. Токены и секреты не
